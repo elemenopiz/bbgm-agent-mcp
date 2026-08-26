@@ -13,29 +13,42 @@
   "packageManager": "pnpm@11.0.0",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "dev": "tsx src/cli.ts",
     "engine:build": "node scripts/build-engine-bridge.ts",
     "engine:verify": "node scripts/verify-engine.ts",
+    "engine:smoke": "tsx scripts/smoke-engine.mts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "research:evaluate": "tsx src/research/evaluate.ts",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:contract": "vitest run tests/contract",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "pnpm build && vitest run tests/e2e",
+    "test:determinism": "vitest run tests/determinism",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
+    "fake-indexeddb": "^6.2.5",
     "seedrandom": "^3.0.5",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.0.0",
     "@types/seedrandom": "^3.0.8",
+    "eslint": "^10.9.1",
+    "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.0.0",
     "tsx": "^4.0.0",
     "typescript": "^6.0.0",
+    "typescript-eslint": "^8.68.0",
     "vitest": "^4.0.0"
   }
 }

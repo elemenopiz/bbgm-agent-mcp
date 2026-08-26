@@ -17,6 +17,12 @@
     "skipLibCheck": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "scripts/**/*.mts",
+    "tests/**/*.ts",
+    "engine-bridge/**/*.ts",
+    "vitest.config.ts"
+  ]
 }
-

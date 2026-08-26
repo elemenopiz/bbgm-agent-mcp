@@ -18,4 +18,3 @@ export const stateHash = (value: unknown): string =>
   createHash("sha256")
     .update(JSON.stringify(canonicalize(value)))
     .digest("hex");
-

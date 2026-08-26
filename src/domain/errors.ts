@@ -6,6 +6,7 @@ export type DomainErrorCode =
   | "ILLEGAL_ACTION"
   | "INVARIANT_VIOLATION"
   | "ENGINE_ERROR"
+  | "TIMEOUT"
   | "RESOURCE_LIMIT";
 
 export class DomainError extends Error {
@@ -27,4 +28,3 @@ export class DomainError extends Error {
     }
   }
 }
-
