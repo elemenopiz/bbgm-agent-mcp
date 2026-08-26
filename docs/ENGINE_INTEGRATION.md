@@ -2,8 +2,9 @@
 
 How this project talks to the real Basketball GM (zengm) engine: what is
 pinned, what globals get installed and why, how a worker is bundled, and the
-exact, current status of the headless spike (including two bugs that were
-found and fixed by actually running it — this is not a theoretical writeup).
+exact, current status of the headless spike (including seven bugs, across two
+live-verification passes, that were found and fixed by actually running it —
+this is not a theoretical writeup).
 
 ## Pinned upstream commit
 
@@ -181,20 +182,21 @@ summary. Every `"high"` entry below was cross-checked against the exact
 function zengm's own UI/api layer calls for that action, not guessed from
 patterns:
 
-| SimulationEngine method             | Real zengm call(s)                                                                                                                                                                            | Confidence                                                                             | Exercised this session?                                        |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `create`                            | `core.league.createStream(...)`                                                                                                                                                               | high                                                                                   | yes                                                            |
-| `getRawState`                       | `idb.cache.{players,teams,teamSeasons,draftPicks,schedule,events}.*`, `core.team.getPayroll`                                                                                                  | high                                                                                   | yes                                                            |
-| `getOptions`                        | same reads as `getRawState` plus `core.draft.getOrder`                                                                                                                                        | high                                                                                   | yes                                                            |
-| `advance`                           | `api.playMenu.{day,untilRegularSeason,untilDraft,untilYourNextPick,untilResignPlayers}` + `core.phase.newPhase` directly for RESIGN_PLAYERS (see bug #5 below), chosen by current zengm phase | high                                                                                   | yes — a full real season, preseason through the next preseason |
-| `makeDraftPick`                     | `api.main.draftUser(pid, conditions)`                                                                                                                                                         | high                                                                                   | yes — 2 real picks made                                        |
-| `exportSnapshot` / `importSnapshot` | raw `idb.league` object-store dump/restore + `connectLeague` + `beforeLeague`                                                                                                                 | high                                                                                   | yes — round-tripped, state verified consistent                 |
-| `setLineup`                         | `api.main.reorderRosterDrag(sortedPids)`                                                                                                                                                      | high                                                                                   | no                                                             |
-| `releasePlayer`                     | `api.main.releasePlayer({pids})`                                                                                                                                                              | high                                                                                   | no                                                             |
-| `signFreeAgent`                     | `core.contractNegotiation.create(pid, false, tid)` + `api.main.acceptContractNegotiation({pid, amount, exp})`                                                                                 | high                                                                                   | no                                                             |
-| `executeTrade`                      | `api.main.createTrade(teams)` + `api.main.proposeTrade(false, conditions)`                                                                                                                    | high                                                                                   | no                                                             |
-| `evaluateTrade`                     | `core.trade.summary(teams)` + `new team.ValueChangeCalculator().evaluate(...)`, deliberately _not_ going through `trade.create`/`trade.propose` so it never mutates                           | medium                                                                                 | no                                                             |
-| `negotiateContract`                 | Real negotiation flow when the player happens to be a free agent (e.g. mid-resign-window); direct `core.player.setContract(...)` write otherwise                                              | low — see compatibility.ts, this is the one method with no clean real-zengm equivalent | no                                                             |
+| SimulationEngine method             | Real zengm call(s)                                                                                                                                                                            | Confidence                                                                             | Exercised this session?                                           |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `create`                            | `core.league.createStream(...)`                                                                                                                                                               | high                                                                                   | yes                                                               |
+| `getRawState`                       | `idb.cache.{players,teams,teamSeasons,draftPicks,schedule,events}.*`, `core.team.getPayroll`                                                                                                  | high                                                                                   | yes                                                               |
+| `getOptions`                        | same reads as `getRawState` plus `core.draft.getOrder`                                                                                                                                        | high                                                                                   | yes                                                               |
+| `advance`                           | `api.playMenu.{day,untilRegularSeason,untilDraft,untilYourNextPick,untilResignPlayers}` + `core.phase.newPhase` directly for RESIGN_PLAYERS (see bug #5 below), chosen by current zengm phase | high                                                                                   | yes — a full real season, preseason through the next preseason    |
+| `makeDraftPick`                     | `api.main.draftUser(pid, conditions)`                                                                                                                                                         | high                                                                                   | yes — 2 real picks made                                           |
+| `exportSnapshot` / `importSnapshot` | raw `idb.league` object-store dump/restore + `connectLeague` + `beforeLeague`                                                                                                                 | high                                                                                   | yes — round-tripped, state verified consistent                    |
+| `getTeamRoster`                     | `idb.cache.players.indexGetAll("playersByTid", tid)`, parameterized by an arbitrary team                                                                                                      | high                                                                                   | yes — read another team's real roster                             |
+| `setLineup`                         | `api.main.reorderRosterDrag(sortedPids)`                                                                                                                                                      | high                                                                                   | yes                                                               |
+| `releasePlayer`                     | `api.main.releasePlayer({pids})`                                                                                                                                                              | high                                                                                   | yes                                                               |
+| `signFreeAgent`                     | `core.contractNegotiation.create(pid, false, tid)` + `api.main.acceptContractNegotiation({pid, amount, exp})`                                                                                 | high                                                                                   | yes — at the real league-minimum contract (see below)             |
+| `executeTrade`                      | `api.main.createTrade(teams)` + `api.main.proposeTrade(false, conditions)`                                                                                                                    | high                                                                                   | yes — a real trade a real opponent AI accepted                    |
+| `evaluateTrade`                     | `core.trade.summary(teams)` + `new team.ValueChangeCalculator().evaluate(...)`, deliberately _not_ going through `trade.create`/`trade.propose` so it never mutates                           | medium                                                                                 | yes — used to find and confirm the accepted trade above           |
+| `negotiateContract`                 | Real negotiation flow when the player happens to be a free agent (e.g. mid-resign-window); direct `core.player.setContract(...)` write otherwise                                              | low — see compatibility.ts, this is the one method with no clean real-zengm equivalent | yes — the fallback path specifically, extending a rostered player |
 
 ## Spike status: **executed against a real checkout end to end — PASSED**
 
@@ -290,20 +292,64 @@ legacy will have text`). The original mapping assumed `text` was always
    unanswerable) confirm dialog been accepted.
 
 **This adapter has been exercised for real, not just read from source.**
-Every "high confidence" call in the table above ran successfully against a
-real league in this session, and five real defects that only a real run
-could have caught were found and fixed in the same session. What it has
-_not_ been exercised against yet: `evaluateTrade`/`executeTrade` (no trade
-partner was proposed in this run), `negotiateContract` against a
-non-free-agent player (the low-confidence fallback path), `setLineup`, and
-multiple concurrent episodes/workers. Those remain "confidence per
-compatibility.ts, not independently run" — a natural next step is extending
-`scripts/smoke-engine.mts` to exercise them too.
+Every single `SimulationEngine` method — including every one previously
+listed as "high confidence, not independently exercised" — has now actually
+run successfully against a real league, across two live-verification
+passes, and seven real defects that only a real run could have caught were
+found and fixed (five in the first pass, two more in the second).
+
+### Second live-verification pass: every remaining mutation
+
+After the initial spike (above), a second pass specifically targeted every
+method the first pass hadn't touched: `getTeamRoster` (added after the
+first pass — see its compatibility.ts entry for why), `setLineup`,
+`releasePlayer`, `signFreeAgent`, `negotiateContract`'s low-confidence
+fallback path, `evaluateTrade`/`executeTrade` against a real opponent AI,
+and `makeDraftPick`, all in one continuous real episode (see
+`tests/integration/realEngine.test.ts`, "exercises every remaining
+mutation..."). Result: **passed**, ~49s. Two more real, previously-unknown
+issues were found and fixed by that run:
+
+6. **`signFreeAgent`'s real cap-space gating rejects any offer above the
+   league minimum salary once a team is over the cap** — confirmed correct
+   zengm behavior (`"You cannot go over the salary cap to sign free agents
+to contracts higher than the minimum salary."`), not a bug in this
+   adapter. The sample league here starts well over the cap by default, so
+   the first attempt at a mid-size contract failed exactly as real zengm
+   intends. Fixed at the call site (the test now signs at zengm's real
+   `minContract` default of $1.2M, confirmed by reading
+   `defaultGameAttributes.ts` directly rather than guessing), not in the
+   adapter — this is not an adapter defect to correct.
+7. **`rosterOrder` uniqueness** — see the dedicated `compatibility.ts` entry
+   ("PlayerSummary.rosterOrder uniqueness"). In short: real zengm doesn't
+   keep every roster member's `rosterOrder` field a clean unique sequence
+   after every composition change, so `getRawState()`/`getTeamRoster()` now
+   normalize it (`mappings.ts: normalizeRosterOrder`); the fake engine had
+   the identical class of latent bug and got the analogous fix.
+
+Also confirmed in this pass: `evaluateTrade`'s dry-run legality/acceptance
+verdict was used live to find a real opponent team willing to accept a
+trade, and the subsequent `executeTrade` call against that exact proposal
+succeeded — the first live cross-check that the two independent code paths
+(`core.trade.summary`+`ValueChangeCalculator` for the dry run vs.
+`api.main.createTrade`+`proposeTrade` for execution) agree in practice, not
+just by inspection.
+
+**Not yet exercised**: multiple concurrent _mutating_ real episodes racing
+against each other (the concurrent-episode check that exists,
+`tests/integration/realEngine.test.ts`'s determinism test, only issues
+reads/advances, not a mix of every mutation type, concurrently); an
+`evaluateTrade` proposal that is legal but declined (every trade tried in
+testing so far was either illegal or accepted); and league saves customized
+beyond `CreateEpisodeInput`'s defaults (a >2-round draft, expansion/fantasy
+draft phases — see the `Phase mapping` and `DraftPickSummary.round` entries
+in `compatibility.ts`).
 
 ### Independently re-verified
 
-The above was written by the session that built the adapter. It was then
-independently re-run and re-confirmed by the lead integration session:
+Everything above (both passes) was independently re-run and re-confirmed by
+the lead integration session, not just taken on trust from whichever
+session did the original work:
 
 - Re-ran `pnpm engine:smoke` from a clean state against the same checkout —
   **passed again**, full season, real draft picks, snapshot round-trip,
@@ -315,30 +361,26 @@ independently re-run and re-confirmed by the lead integration session:
   isolation check: two real `BasketballGmEngine` instances (two real
   `node:worker_threads` workers, two real in-memory zengm leagues) ran fully
   concurrently without cross-contaminating each other's state or RNG.
+- Independently reproduced the second pass's `makeDraftPick` failure from a
+  cold start (a throwaway debug script mirroring the exact same operation
+  sequence), confirmed the root cause was the `rosterOrder` collision (not
+  something specific to the test harness), applied the `mappings.ts` fix,
+  and re-ran to confirm it actually resolved the issue before trusting it.
 
 ## Known follow-ups
 
-- `scripts/smoke-engine.mts` must currently be run via `tsx` (or another
-  loader that maps `.js`-suffixed relative specifiers back to sibling `.ts`
-  sources), not plain `node scripts/smoke-engine.mts` — plain Node's native
-  TS support strips types but does not do that extension remapping, and
-  fails with `ERR_MODULE_NOT_FOUND` looking for a `.js` file that doesn't
-  exist. `package.json`'s `engine:smoke` script (not owned by this pass —
-  see the session report) should invoke it the same way `"dev": "tsx
-src/cli.ts"` does: `tsx scripts/smoke-engine.mts`.
 - The `NODE_ENV="test"` / dummy-names trade-off above: a real, minimal
   `postMessage` responder for `promise-worker-bi`'s RPC protocol would let
   `NODE_ENV` stay `"production"` and get real generated names back, at the
   cost of reimplementing a small slice of zengm's own UI-thread contract.
-  Not attempted this pass.
-- `evaluateTrade`'s "must not mutate" implementation (`core.trade.summary` +
-  `ValueChangeCalculator`, bypassing the normal `trade.create`-then-`trade.
-propose` staging flow) has not been cross-checked against a live
-  `trade.propose()` call on the same proposal to confirm they agree — see
-  compatibility.ts.
-- `negotiateContract`'s direct `setContract` fallback path (for a
-  currently-rostered player who is not presently a free agent) has not been
-  exercised against a real checkout.
+  Not attempted.
+- A live cross-check that `evaluateTrade`'s dry-run verdict and
+  `executeTrade`'s real outcome agree on a _declined_ trade (only an
+  accepted-trade case has been exercised so far).
+- Racing multiple mutation types across multiple real concurrent episodes
+  (as opposed to the same mutation type, or reads/advances only).
+- Custom league configurations beyond what `CreateEpisodeInput` produces by
+  default (more than 2 draft rounds, expansion/fantasy drafts).
 
 ## Upgrading the pinned commit
 

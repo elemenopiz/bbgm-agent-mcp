@@ -245,7 +245,56 @@ export const KNOWN_INCOMPATIBILITIES: IncompatibilityNote[] = [
       'PHASE_STEP_ACTION entry was checked against playMenu.ts for a similar toUI("confirm", ...) ' +
       "gate and none have one.",
   },
+  {
+    area: "PlayerSummary.rosterOrder uniqueness (mappings.ts: normalizeRosterOrder)",
+    confidence: "high",
+    note:
+      "Confirmed against a real run: after releasePlayer + signFreeAgent + negotiateContract + " +
+      "executeTrade + makeDraftPick in sequence on the same real league, the LINEUP_VALID invariant " +
+      "(domain/invariants.ts) failed with duplicate rosterOrder values. Root cause: zengm's raw " +
+      "rosterOrder field is not guaranteed to be a clean, unique 0..n-1 sequence at every moment -- " +
+      "a freshly drafted player in particular can land with a rosterOrder that duplicates an " +
+      "existing roster member's; zengm only reconciles this the next time something explicitly " +
+      "re-sorts the depth chart (e.g. reorderRosterDrag), not automatically on every roster-" +
+      "composition change (release/sign/trade/draft). getRawState() and getTeamRoster() both now " +
+      "pass every roster through normalizeRosterOrder() (mappings.ts), which re-numbers to a stable, " +
+      "unique 0..n-1 sequence ordered by existing rosterOrder (preserving any depth-chart order " +
+      "already set via setLineup), tie-broken by pid, and recomputes role from the corrected order. " +
+      "tests/fixtures/FakeSimulationEngine.ts had the identical class of bug (a released player " +
+      "leaves a gap that a later push, keyed off array.length, can collide with) and got the same " +
+      "fix, independently implemented, for the same reason.",
+  },
+  {
+    area: "getTeamRoster (adapter.ts)",
+    confidence: "high",
+    note:
+      "Added after the initial spike, once it became clear an agent cannot construct a real trade " +
+      "proposal without seeing what a prospective partner actually has (get_state's roster view " +
+      "only ever returned the user's own team). Implemented via the same real " +
+      'idb.cache.players.indexGetAll("playersByTid", tid) store read getRawState() already uses for ' +
+      "the user's own roster, parameterized by an arbitrary tid -- public roster info, matching " +
+      "ordinary real-GM visibility (unlike hidden opponent valuations, which evaluateTrade " +
+      "deliberately does not expose). Confirmed live against a real league.",
+  },
 ];
+
+/**
+ * Second live-verification pass (after the initial spike above): every
+ * previously-"high confidence, not independently exercised" mutation was
+ * actually run against the same real checkout in one continuous episode --
+ * getTeamRoster, setLineup, releasePlayer, signFreeAgent, negotiateContract
+ * (the low-confidence fallback path specifically), executeTrade (a real
+ * trade an actual opponent AI accepted), and makeDraftPick, followed by
+ * end_episode. See tests/integration/realEngine.test.ts ("exercises every
+ * remaining mutation...") and docs/ENGINE_INTEGRATION.md. Two real,
+ * previously-unknown issues were found and fixed by that run, not by
+ * further code review: signFreeAgent's real salary-cap gating rejects any
+ * offer above the league minimum contract for a team already over the cap
+ * (confirmed correct zengm behavior, not a bug in this adapter -- the test
+ * now signs at the real minContract default of $1.2M); and the
+ * rosterOrder-uniqueness issue documented above. Every SimulationEngine
+ * method now has at least one real, live, passing exercise on record.
+ */
 
 /** Convenience lookup used in error/log messages that reference a known gap. */
 export function describeIncompatibility(area: string): string | undefined {

@@ -263,6 +263,7 @@ export const rosterViewSchema = z
   .object({
     ...viewEnvelopeSchema,
     view: z.literal("roster"),
+    teamId: teamIdSchema.describe("The team this roster belongs to"),
     players: z.array(playerSummarySchema),
     page: pageMetaSchema,
   })
@@ -363,6 +364,11 @@ export const getStateInputSchema = z
       .describe("Bounded slice of league state to return"),
     cursor: paginationInputSchema.shape.cursor,
     limit: paginationInputSchema.shape.limit,
+    teamId: teamIdSchema
+      .optional()
+      .describe(
+        "Only used when view=\"roster\": read this team's public roster instead of the user's own. Omit for the user's own roster.",
+      ),
   })
   .strict();
 

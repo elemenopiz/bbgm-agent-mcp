@@ -12,6 +12,7 @@ import type {
   EngineRawState,
   MakeDraftPickInput,
   NegotiateContractInput,
+  PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
   SignFreeAgentInput,
@@ -61,6 +62,10 @@ export class BasketballGmEngine implements SimulationEngine {
 
   async getRawState(): Promise<EngineRawState> {
     return this.call<EngineRawState>("getRawState");
+  }
+
+  async getTeamRoster(tid: number): Promise<PlayerSummary[]> {
+    return this.call<PlayerSummary[]>("getTeamRoster", { tid });
   }
 
   async getOptions(): Promise<EngineOption[]> {

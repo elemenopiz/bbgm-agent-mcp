@@ -159,6 +159,45 @@ export function mapPlayerToSummary(
 }
 
 /**
+ * Confirmed against a real run: zengm's raw `rosterOrder` field is NOT
+ * guaranteed to be a clean, unique 0..n-1 sequence at every moment -- in
+ * particular, a freshly drafted player can land with a `rosterOrder` that
+ * duplicates an existing roster member's, which zengm apparently only
+ * reconciles the next time something explicitly re-sorts the depth chart
+ * (e.g. `reorderRosterDrag`), not automatically on every roster-composition
+ * change. `PlayerSummary.rosterOrder` is documented (and invariant-checked,
+ * see domain/invariants.ts LINEUP_VALID) as unique-per-team, so this adapter
+ * must not hand raw zengm values straight through. Re-numbers every player
+ * to a stable, unique 0..n-1 sequence -- ordered by their existing
+ * `rosterOrder` (preserving whatever depth-chart order the team already had,
+ * including one just set via `setLineup`), tie-broken by `pid` for any
+ * actual duplicates -- and recomputes `role` from the corrected order.
+ * Applied to every roster this adapter returns (the user's own and, via
+ * `getTeamRoster`, any other team's), independent of the array's own sort
+ * order (by convention, callers sort the returned array by `overall`
+ * descending for display; that sort order is unrelated to the `rosterOrder`
+ * field values fixed up here).
+ */
+export function normalizeRosterOrder(
+  players: PlayerSummary[],
+): PlayerSummary[] {
+  const byStableOrder = [...players].sort(
+    (a, b) => a.rosterOrder - b.rosterOrder || a.pid - b.pid,
+  );
+  const rosterOrderByPid = new Map(
+    byStableOrder.map((player, index) => [player.pid, index]),
+  );
+  return players.map((player) => {
+    const rosterOrder = rosterOrderByPid.get(player.pid) ?? player.rosterOrder;
+    return {
+      ...player,
+      rosterOrder,
+      role: derivePlayerRole(rosterOrder, player.injuryGamesRemaining),
+    };
+  });
+}
+
+/**
  * Maps an undrafted prospect. `scoutedOverall`/`scoutedPotential` use the
  * player's raw (non-fuzzed) ratings; real zengm applies a scouting-accuracy
  * "fuzz" to ratings shown to the user for players who haven't proven

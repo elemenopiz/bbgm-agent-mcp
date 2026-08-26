@@ -7,6 +7,7 @@ import type {
   EngineRawState,
   MakeDraftPickInput,
   NegotiateContractInput,
+  PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
   SignFreeAgentInput,
@@ -30,6 +31,14 @@ export type SimulationEngine = {
   getRawState(): Promise<EngineRawState>;
 
   getOptions(): Promise<EngineOption[]>;
+
+  /**
+   * Public roster info for any team in the league, not just the user's own --
+   * needed to construct a real trade proposal (an agent must be able to see
+   * what a prospective trade partner actually has). Matches ordinary-play
+   * visibility: rosters are public, unlike hidden opponent valuations.
+   */
+  getTeamRoster(tid: number): Promise<PlayerSummary[]>;
 
   /** Must not mutate state. */
   evaluateTrade(proposal: TradeProposal): Promise<TradeEvaluation>;

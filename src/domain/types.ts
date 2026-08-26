@@ -223,6 +223,8 @@ export type GetStateInput = {
   view: GetStateViewName;
   cursor?: number | undefined;
   limit?: number | undefined;
+  /** Only meaningful for view="roster": which team's roster to read. Defaults to the user's own team. */
+  teamId?: number | undefined;
 };
 
 export type PageMeta = {
@@ -256,6 +258,8 @@ export type OverviewView = ViewEnvelope & {
 
 export type RosterView = ViewEnvelope & {
   view: "roster";
+  /** The team this roster belongs to -- the user's own team unless GetStateInput.teamId selected another. */
+  teamId: number;
   players: PlayerSummary[];
   page: PageMeta;
 };

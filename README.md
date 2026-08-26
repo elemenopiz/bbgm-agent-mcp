@@ -205,7 +205,14 @@ or tested transcript. Field values are plausible but fabricated; consult
 // -> { "revision": 0, "options": [{ "type": "advance", "target": "next_game" }, ...] }
 ```
 
-**4. Dry-run a trade before committing to it**
+**4. See what a prospective trade partner actually has**
+
+```jsonc
+// call: bbgm_get_state { "episodeId": "e_9f2a...", "view": "roster", "teamId": 7 }
+// -> a "roster" view of team 7's players (teamId: 7), not the user's own
+```
+
+**5. Dry-run a trade before committing to it**
 
 ```jsonc
 // call: bbgm_evaluate_trade
@@ -220,7 +227,7 @@ or tested transcript. Field values are plausible but fabricated; consult
 // -> { "legal": true, "acceptedByOtherTeam": true, "payrollDelta": -4.2, ... }
 ```
 
-**5. Execute it, using the revision from step 2/3 and a fresh idempotency key**
+**6. Execute it, using the revision from step 2/3 and a fresh idempotency key**
 
 ```jsonc
 // call: bbgm_execute_trade
@@ -237,7 +244,7 @@ or tested transcript. Field values are plausible but fabricated; consult
 // -> mutationResult with revision: 1
 ```
 
-**6. Advance to the next game**
+**7. Advance to the next game**
 
 ```jsonc
 // call: bbgm_advance
@@ -250,14 +257,14 @@ or tested transcript. Field values are plausible but fabricated; consult
 // -> mutationResult with revision: 2
 ```
 
-**7. Checkpoint before something risky**
+**8. Checkpoint before something risky**
 
 ```jsonc
 // call: bbgm_checkpoint { "action": "create", "episodeId": "e_9f2a..." }
 // -> { "checkpoint": { "checkpointId": "c_71bd...", "revision": 2, ... } }
 ```
 
-**8. End the episode when the scenario horizon is reached**
+**9. End the episode when the scenario horizon is reached**
 
 ```jsonc
 // call: bbgm_end_episode { "episodeId": "e_9f2a...", "exportFinalSnapshot": true }

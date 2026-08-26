@@ -50,6 +50,7 @@ import type {
   OptionsResult,
   OverviewView,
   Phase,
+  PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
   SignFreeAgentInput,
@@ -237,6 +238,26 @@ export class DomainService {
     const hash = this.computeStateHash(record.revision, state);
     const constraints = this.evaluateConstraints(record, state);
     const objectives = buildObjectivesFromSpec(record.constraints, state);
+
+    let rosterOverride:
+      { teamId: number; players: PlayerSummary[] } | undefined;
+    if (
+      input.view === "roster" &&
+      input.teamId !== undefined &&
+      input.teamId !== state.userTeam.tid
+    ) {
+      if (record.status !== "active") {
+        throw new DomainError(
+          "ILLEGAL_ACTION",
+          "Another team's roster can only be read while the episode is active (the user's own final roster stays readable after end_episode, but other teams' live state does not)",
+        );
+      }
+      const players = await this.runQueued(record, () =>
+        record.engine.getTeamRoster(input.teamId!),
+      );
+      rosterOverride = { teamId: input.teamId, players };
+    }
+
     return buildView(
       input.view,
       {
@@ -251,6 +272,7 @@ export class DomainService {
         objectives,
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
         ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(rosterOverride ? { rosterOverride } : {}),
       },
     );
   }

@@ -6,6 +6,7 @@ import type {
   EngineRawState,
   MakeDraftPickInput,
   NegotiateContractInput,
+  PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
   SignFreeAgentInput,
@@ -22,6 +23,7 @@ import {
   mapScheduleGame,
   mapTeamSummary,
   mapTransactionRecord,
+  normalizeRosterOrder,
   phaseFromZengm,
   ZENGM_PHASE,
   type RawDraftPickRow,
@@ -222,6 +224,7 @@ type IdbTransactionLike = {
 export type BasketballGmAdapter = {
   create(input: CreateEpisodeInput): Promise<void>;
   getRawState(): Promise<EngineRawState>;
+  getTeamRoster(params: { tid: number }): Promise<PlayerSummary[]>;
   getOptions(): Promise<EngineOption[]>;
   evaluateTrade(proposal: TradeProposal): Promise<TradeEvaluation>;
   executeTrade(proposal: TradeProposal): Promise<EngineEvent[]>;
@@ -513,9 +516,9 @@ export function createBasketballGmAdapter(
           confName.get(userTeamRow.cid) ?? String(userTeamRow.cid),
         divisionName: divName.get(userTeamRow.did) ?? String(userTeamRow.did),
       }),
-      roster: rawRoster
-        .map((p) => mapPlayerToSummary(p, currentSeason))
-        .sort((a, b) => b.overall - a.overall),
+      roster: normalizeRosterOrder(
+        rawRoster.map((p) => mapPlayerToSummary(p, currentSeason)),
+      ).sort((a, b) => b.overall - a.overall),
       freeAgents: freeAgentRows
         .map((p) => mapPlayerToSummary(p, currentSeason))
         .sort((a, b) => b.overall - a.overall),
@@ -531,6 +534,19 @@ export function createBasketballGmAdapter(
       legalActionCategories: await legalActionCategories(),
       nextDecision: await nextDecisionLabel(),
     };
+  };
+
+  const getTeamRoster = async (params: {
+    tid: number;
+  }): Promise<PlayerSummary[]> => {
+    requireCreated();
+    const rows = await idb.cache.players.indexGetAll(
+      "playersByTid",
+      params.tid,
+    );
+    return normalizeRosterOrder(
+      rows.map((p) => mapPlayerToSummary(p, season())),
+    ).sort((a, b) => b.overall - a.overall);
   };
 
   const getOptions = async (): Promise<EngineOption[]> => {
@@ -904,6 +920,7 @@ export function createBasketballGmAdapter(
   return {
     create,
     getRawState,
+    getTeamRoster,
     getOptions,
     evaluateTrade,
     executeTrade,

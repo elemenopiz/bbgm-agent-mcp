@@ -109,6 +109,48 @@ describe("DomainService.getState views", () => {
     expect(result.page.hasMore).toBe(true);
     expect(result.page.totalCount).toBe(12);
   });
+
+  test("roster view defaults to the user's own team but teamId can read another team's public roster", async () => {
+    const overview = await createEpisode();
+    const own = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "roster",
+    });
+    if (own.view !== "roster") throw new Error("expected roster view");
+    expect(own.teamId).toBe(overview.userTeam.tid);
+
+    const other = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "roster",
+      teamId: 9001,
+    });
+    if (other.view !== "roster") throw new Error("expected roster view");
+    expect(other.teamId).toBe(9001);
+    expect(other.players.length).toBeGreaterThan(0);
+    expect(other.players.map((p) => p.pid)).not.toEqual(
+      own.players.map((p) => p.pid),
+    );
+  });
+
+  test("reading another team's roster fails once the episode has ended", async () => {
+    const overview = await createEpisode();
+    await domain.endEpisode(overview.episodeId, { exportFinalSnapshot: false });
+    await expect(
+      domain.getState({
+        episodeId: overview.episodeId,
+        view: "roster",
+        teamId: 9001,
+      }),
+    ).rejects.toMatchObject({
+      code: "ILLEGAL_ACTION",
+    });
+    // The user's own roster (cached from end) stays readable.
+    const own = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "roster",
+    });
+    expect(own.view).toBe("roster");
+  });
 });
 
 describe("DomainService mutation safety", () => {

@@ -12,6 +12,7 @@ import type {
   ObjectivesView,
   OverviewView,
   PageMeta,
+  PlayerSummary,
   RosterView,
   ScenarioConstraintSpec,
   ScheduleView,
@@ -113,10 +114,13 @@ export const buildOverviewView = (
 
 const buildRosterView = (
   input: EnvelopeInput,
-  cursor?: number,
-  limit?: number,
+  cursor: number | undefined,
+  limit: number | undefined,
+  rosterOverride: { teamId: number; players: PlayerSummary[] } | undefined,
 ): RosterView => {
-  const { page, meta } = paginate(input.state.roster, cursor, limit);
+  const teamId = rosterOverride?.teamId ?? input.state.userTeam.tid;
+  const players = rosterOverride?.players ?? input.state.roster;
+  const { page, meta } = paginate(players, cursor, limit);
   return {
     schemaVersion: STATE_SCHEMA_VERSION,
     view: "roster",
@@ -125,6 +129,7 @@ const buildRosterView = (
     stateHash: input.stateHash,
     season: input.state.season,
     phase: input.state.phase,
+    teamId,
     players: page,
     page: meta,
   };
@@ -279,6 +284,8 @@ export type ViewContext = {
   objectives: ObjectiveStatus[];
   cursor?: number;
   limit?: number;
+  /** Set when view="roster" is reading a team other than the user's own -- see DomainService.getState. */
+  rosterOverride?: { teamId: number; players: PlayerSummary[] };
 };
 
 export const buildView = (
@@ -290,7 +297,12 @@ export const buildView = (
     case "overview":
       return buildOverviewView(input, context.status, context.constraints);
     case "roster":
-      return buildRosterView(input, context.cursor, context.limit);
+      return buildRosterView(
+        input,
+        context.cursor,
+        context.limit,
+        context.rosterOverride,
+      );
     case "finances":
       return buildFinancesView(input);
     case "standings":

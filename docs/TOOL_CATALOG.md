@@ -125,7 +125,15 @@ rather than defaulting to `overview` for everything.
 
 **Inputs:** `episodeId`; `view` (one of the 10 `GetStateViewName` values);
 `cursor` (non-negative int, optional pagination offset); `limit` (positive
-int, max 50, optional — server-bounded default when omitted).
+int, max 50, optional — server-bounded default when omitted); `teamId`
+(non-negative int, optional, **only meaningful for `view="roster"`**) —
+reads that team's public roster instead of the user's own. This is how an
+agent inspects a prospective trade partner's actual assets before proposing
+anything: rosters are public information in ordinary play, unlike the
+opponent's hidden trade-acceptance valuation (which `bbgm_evaluate_trade`
+deliberately does not expose). Reading another team's roster requires the
+episode to still be active — after `bbgm_end_episode`, only the user's own
+(cached) roster stays readable.
 
 **Output:** one of 10 discriminated-union shapes (`LeagueStateView`), keyed
 by `view`. All share a common envelope
@@ -133,9 +141,16 @@ by `view`. All share a common envelope
 List-bearing views (`roster`, `standings`, `schedule`, `free_agents`,
 `draft` prospects, `transactions`) additionally carry a `page`
 (`{ nextCursor?, hasMore, totalCount, limit }`) so a large league is never
-returned in one call. `overview` carries a `rosterExcerpt` and summary
-counts instead of a full roster; `finances`, `objectives`, and
-`constraints` are unpaginated (bounded by construction).
+returned in one call. `roster` also carries `teamId`, naming whose roster
+is being returned (the user's own team unless `teamId` was passed).
+`overview` carries a `rosterExcerpt` and summary counts instead of a full
+roster; `finances`, `objectives`, and `constraints` are unpaginated
+(bounded by construction).
+
+**Notable errors:** `ILLEGAL_ACTION` if `teamId` names another team and the
+episode has already ended (that team's live state is no longer readable
+once its engine is closed; the user's own final roster remains readable
+regardless).
 
 ---
 

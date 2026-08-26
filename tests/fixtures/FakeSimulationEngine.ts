@@ -176,7 +176,7 @@ export class FakeSimulationEngine implements SimulationEngine {
         luxuryTaxThreshold: salaryCap * 1.2,
         hardCapActive: false,
       },
-      roster: structuredClone(this.roster),
+      roster: this.normalizeRosterOrder(structuredClone(this.roster)),
       freeAgents: structuredClone(this.freeAgents),
       draftProspects: structuredClone(this.draftProspects),
       ownedPicks: structuredClone(this.ownedPicks),
@@ -186,6 +186,15 @@ export class FakeSimulationEngine implements SimulationEngine {
       legalActionCategories: this.legalActionCategories(),
       nextDecision: this.nextDecision(),
     };
+  }
+
+  async getTeamRoster(tid: number): Promise<PlayerSummary[]> {
+    const input = this.requireInput();
+    if (tid === input.userTeamId)
+      return this.normalizeRosterOrder(structuredClone(this.roster));
+    const opponent = this.opponents.get(tid);
+    if (!opponent) throw new Error(`Unknown team ${tid}`);
+    return this.normalizeRosterOrder(structuredClone(opponent.players));
   }
 
   async getOptions(): Promise<({ type: string } & Record<string, unknown>)[]> {
@@ -602,6 +611,40 @@ export class FakeSimulationEngine implements SimulationEngine {
   }
 
   // -- internals -----------------------------------------------------------
+
+  /**
+   * Roster composition changes (release, sign, draft, trade) can leave gaps
+   * or collisions in `rosterOrder` values -- e.g. releasing a middle player
+   * leaves a gap, and a later push keyed off `array.length` can then collide
+   * with a value the gap left behind. `PlayerSummary.rosterOrder` is
+   * documented (and invariant-checked, see domain/invariants.ts
+   * LINEUP_VALID) as unique-per-team, so this re-numbers to a stable, unique
+   * 0..n-1 sequence -- ordered by existing `rosterOrder` (preserving
+   * whatever depth-chart order was last set), tie-broken by `pid` -- mirrors
+   * `normalizeRosterOrder` in src/engine/bbgm/mappings.ts, which fixes the
+   * same class of issue confirmed against the real engine.
+   */
+  private normalizeRosterOrder(players: PlayerSummary[]): PlayerSummary[] {
+    const byStableOrder = [...players].sort(
+      (a, b) => a.rosterOrder - b.rosterOrder || a.pid - b.pid,
+    );
+    const rosterOrderByPid = new Map(
+      byStableOrder.map((player, index) => [player.pid, index]),
+    );
+    return players.map((player) => {
+      const rosterOrder =
+        rosterOrderByPid.get(player.pid) ?? player.rosterOrder;
+      const role: PlayerSummary["role"] =
+        player.injuryGamesRemaining > 0
+          ? "inactive"
+          : rosterOrder < 5
+            ? "starter"
+            : rosterOrder < 8
+              ? "rotation"
+              : "bench";
+      return { ...player, rosterOrder, role };
+    });
+  }
 
   private requireInput(): CreateEpisodeInput {
     // Mirrors the real worker-backed engine: once closed, no further calls can

@@ -130,6 +130,7 @@ const handlers: Record<string, (params: any) => Promise<unknown>> = {
     await adapter.create(params as Parameters<typeof adapter.create>[0]);
   },
   getRawState: async () => adapter.getRawState(),
+  getTeamRoster: async (params) => adapter.getTeamRoster(params),
   getOptions: async () => adapter.getOptions(),
   evaluateTrade: async (params) => adapter.evaluateTrade(params),
   executeTrade: async (params) => adapter.executeTrade(params),

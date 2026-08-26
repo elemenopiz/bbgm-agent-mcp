@@ -23,11 +23,12 @@ release yet; the current package version is `0.1.0`.
   trajectory logging in one place shared by both the MCP tool layer and the
   offline research/evaluation layer.
 - **MCP tool catalog**: 13 `bbgm_*` tools covering episode lifecycle
-  (create/end), observation (`get_state` with 10 bounded, paginated views;
-  `get_options`), trade evaluation and execution, roster/contract
-  management (lineup, release, contract negotiation, free-agent signing,
-  draft picks), simulated-time advancement, and checkpointing
-  (create/list/restore).
+  (create/end), observation (`get_state` with 10 bounded, paginated views,
+  including any team's public roster via an optional `teamId` -- needed to
+  actually construct a trade proposal; `get_options`), trade evaluation and
+  execution, roster/contract management (lineup, release, contract
+  negotiation, free-agent signing, draft picks), simulated-time
+  advancement, and checkpointing (create/list/restore).
 - **Episode isolation** (`src/sessions/`): an `EpisodeManager`/`EpisodeStore`
   that gives each episode its own engine instance and a serialized
   per-episode command queue, so concurrent tool calls against the same
@@ -48,11 +49,17 @@ release yet; the current package version is `0.1.0`.
   package version, license hash, and Node version against
   `bbgm-engine.lock.json` before anything is allowed to run against it.
   Actually executed end to end against a real, separately-obtained zengm
-  checkout via `pnpm engine:smoke`: league creation, a full simulated
-  season (including two real user draft picks), snapshot export/import,
-  and a determinism check across two concurrent real episodes — all
-  passing. See `docs/ENGINE_INTEGRATION.md` for the full account, including
-  five real bugs found and fixed by that run.
+  checkout via `pnpm engine:smoke` and a gated real-engine integration test
+  suite (`tests/integration/realEngine.test.ts`, `BBGM_REAL_ENGINE=1`):
+  league creation, a full simulated season (including real user draft
+  picks), a real trade an actual opponent AI accepted, roster/contract
+  moves (lineup, release, sign, contract negotiation), reading another
+  team's roster, snapshot export/import, checkpoint restore, and a
+  determinism check across concurrent real episodes — every
+  `SimulationEngine` method has at least one real, live, passing exercise
+  on record. See `docs/ENGINE_INTEGRATION.md` for the full account,
+  including seven real bugs found and fixed by those runs (not by code
+  review).
 - **Research/evaluation layer** (`src/research/`): scenario manifests (seed
   sets, horizon, hard constraints/soft objectives, allowed information and
   actions, step budget), a `no_op` and a deterministic `heuristic` baseline

@@ -12,6 +12,7 @@
 export type Method =
   | "create"
   | "getRawState"
+  | "getTeamRoster"
   | "getOptions"
   | "evaluateTrade"
   | "executeTrade"
