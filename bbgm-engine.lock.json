@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/zengm-games/zengm.git",
+  "commit": "4ee432c5b9097ed978749a049fff5823711690dc",
+  "packageVersion": "5.1.0",
+  "requiredNode": "24",
+  "requiredPnpm": "11",
+  "licenseFile": "LICENSE.md",
+  "licenseSha256": "4b062aff490de1273782c6ab56839be01913690f494f0c95ac02bb07cb1f3603",
+  "integrationPatchVersion": 1
+}

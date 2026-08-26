@@ -1,0 +1,7 @@
+.cache
+.data
+dist
+coverage
+node_modules
+pnpm-lock.yaml
+
