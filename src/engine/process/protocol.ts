@@ -13,6 +13,7 @@ export type Method =
   | "create"
   | "getRawState"
   | "getTeamRoster"
+  | "getPlayer"
   | "getOptions"
   | "evaluateTrade"
   | "executeTrade"
@@ -43,6 +44,10 @@ export type Request = {
 export type ResponseError = {
   message: string;
   stack?: string;
+  code?: string;
+  retryable?: boolean;
+  rollbackRequired?: boolean;
+  details?: Record<string, unknown>;
 };
 
 /**

@@ -8,7 +8,13 @@ import { registerTools } from "../tools/registerTools.js";
 export const createServer = (domain: DomainService): McpServer => {
   const server = new McpServer(
     { name: "bbgm-agent-mcp", version: WRAPPER_VERSION },
-    { instructions: SERVER_INSTRUCTIONS },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+      // The catalog is fixed after construction. Keeping listChanged false
+      // prevents clients from waiting for notifications this process never
+      // emits while still advertising the required tools capability.
+      capabilities: { tools: { listChanged: false } },
+    },
   );
 
   registerTools(server, domain);

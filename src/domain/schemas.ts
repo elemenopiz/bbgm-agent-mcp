@@ -1,6 +1,12 @@
 import * as z from "zod/v4";
 
-import { GET_STATE_VIEWS, PHASES } from "./types.js";
+import {
+  DEFAULT_ALLOWED_ACTIONS,
+  DEFAULT_ALLOWED_INFORMATION,
+  ADVANCE_TARGETS,
+  GET_STATE_VIEWS,
+  PHASES,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Primitive / shared field schemas
@@ -78,6 +84,149 @@ export const playerSummarySchema = z
     injuryGamesRemaining: z.number().int().nonnegative(),
     role: playerRoleSchema,
     rosterOrder: z.number().int().nonnegative(),
+    overallChange: z.number().optional(),
+    potentialChange: z.number().optional(),
+    skills: z.array(z.string()).optional(),
+    untradable: z.boolean().optional(),
+    willingToNegotiate: z.boolean().optional(),
+    probWilling: z.number().optional(),
+    askingAmount: z.number().optional(),
+    yearsWithTeam: z.number().optional(),
+    gamesPlayed: z.number().optional(),
+    minutesPerGame: z.number().optional(),
+    pointsPerGame: z.number().optional(),
+    reboundsPerGame: z.number().optional(),
+    assistsPerGame: z.number().optional(),
+    per: z.number().optional(),
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Player detail (bbgm_get_player)
+// ---------------------------------------------------------------------------
+
+export const playerRatingsSeasonSchema = z
+  .object({
+    season: z.number().int(),
+    teamId: teamIdSchema.optional(),
+    age: z.number().int().optional(),
+    overall: z.number().optional(),
+    potential: z.number().optional(),
+    hgt: z.number().optional(),
+    str: z.number().optional(),
+    spd: z.number().optional(),
+    jmp: z.number().optional(),
+    endu: z.number().optional(),
+    ins: z.number().optional(),
+    dnk: z.number().optional(),
+    ft: z.number().optional(),
+    fg: z.number().optional(),
+    tp: z.number().optional(),
+    oiq: z.number().optional(),
+    diq: z.number().optional(),
+    drb: z.number().optional(),
+    pss: z.number().optional(),
+    reb: z.number().optional(),
+    skills: z.array(z.string()).optional(),
+  })
+  .strict();
+
+export const playerStatsSeasonSchema = z
+  .object({
+    season: z.number().int(),
+    teamId: teamIdSchema.optional(),
+    playoffs: z.boolean(),
+    gamesPlayed: z.number().optional(),
+    minutesPerGame: z.number().optional(),
+    pointsPerGame: z.number().optional(),
+    reboundsPerGame: z.number().optional(),
+    assistsPerGame: z.number().optional(),
+    stealsPerGame: z.number().optional(),
+    blocksPerGame: z.number().optional(),
+    turnoversPerGame: z.number().optional(),
+    fieldGoalPct: z.number().optional(),
+    threePointPct: z.number().optional(),
+    freeThrowPct: z.number().optional(),
+    per: z.number().optional(),
+    offensiveWinShares: z.number().optional(),
+    defensiveWinShares: z.number().optional(),
+    winShares: z.number().optional(),
+    winSharesPer48: z.number().optional(),
+    offensiveBPM: z.number().optional(),
+    defensiveBPM: z.number().optional(),
+    bpm: z.number().optional(),
+    vorp: z.number().optional(),
+    trueShootingPct: z.number().optional(),
+    usagePct: z.number().optional(),
+  })
+  .strict();
+
+export const playerContractYearSchema = z
+  .object({
+    season: z.number().int(),
+    amount: z.number(),
+    type: z.enum(["past", "current", "future"]),
+  })
+  .strict();
+
+export const playerAwardSchema = z
+  .object({
+    season: z.number().int(),
+    type: z.string(),
+  })
+  .strict();
+
+export const playerInjuryHistoryEntrySchema = z
+  .object({
+    season: z.number().int().optional(),
+    type: z.string(),
+    games: z.number().optional(),
+  })
+  .strict();
+
+export const playerDraftInfoSchema = z
+  .object({
+    year: z.number().int().optional(),
+    round: z.number().int().optional(),
+    pick: z.number().int().optional(),
+    originalTeamId: teamIdSchema.optional(),
+  })
+  .strict();
+
+export const playerDetailSchema = z
+  .object({
+    pid: pidSchema,
+    name: z.string().optional(),
+    age: z.number().int().optional(),
+    position: z.string().optional(),
+    teamId: teamIdSchema.optional(),
+    ratingsHistory: z.array(playerRatingsSeasonSchema),
+    statsHistory: z.array(playerStatsSeasonSchema),
+    contractAmount: z.number().optional(),
+    contractExpires: z.number().int().optional(),
+    contractSchedule: z.array(playerContractYearSchema),
+    awards: z.array(playerAwardSchema),
+    draft: playerDraftInfoSchema.optional(),
+    currentInjury: z
+      .object({ type: z.string(), gamesRemaining: z.number().int() })
+      .strict()
+      .optional(),
+    injuryHistory: z.array(playerInjuryHistoryEntrySchema),
+  })
+  .strict();
+
+export const getPlayerInputSchema = z
+  .object({
+    episodeId: episodeIdSchema,
+    pid: pidSchema,
+  })
+  .strict();
+
+export const getPlayerResultSchema = z
+  .object({
+    episodeId: episodeIdSchema,
+    revision: z.number().int().nonnegative(),
+    player: playerDetailSchema,
   })
   .strict();
 
@@ -97,7 +246,7 @@ export const draftPickSummarySchema = z
   .object({
     dpid: dpidSchema,
     season: z.number().int(),
-    round: z.union([z.literal(1), z.literal(2)]),
+    round: z.number().int().positive(),
     originalTeamId: teamIdSchema,
     currentTeamId: teamIdSchema,
     protection: z.string().optional(),
@@ -118,6 +267,8 @@ export const teamSummarySchema = z
     salaryCap: z.number(),
     capSpace: z.number(),
     luxuryTaxThreshold: z.number(),
+    minContract: z.number(),
+    maxContract: z.number(),
     hardCapActive: z.boolean(),
   })
   .strict();
@@ -201,6 +352,40 @@ export const scenarioConstraintSpecSchema = z
   })
   .strict();
 
+export const scenarioPolicySchema = z
+  .object({
+    allowedInformation: z
+      .array(z.string().min(1).max(100))
+      .default([...DEFAULT_ALLOWED_INFORMATION])
+      .describe("State channels the agent is permitted to observe"),
+    allowedActions: z
+      .array(z.string().min(1).max(100))
+      .default([...DEFAULT_ALLOWED_ACTIONS])
+      .describe("Tool action categories the agent is permitted to use"),
+    allowedAdvanceTargets: z
+      .enum(ADVANCE_TARGETS)
+      .array()
+      .optional()
+      .describe(
+        "Specific advance targets permitted to this scenario; use a narrow milestone list to prevent unrestricted time skipping",
+      ),
+    maxSteps: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(5000)
+      .optional()
+      .describe("Maximum number of agent action attempts"),
+    horizonSeasons: z
+      .number()
+      .int()
+      .positive()
+      .max(20)
+      .optional()
+      .describe("Maximum seasons from the episode's starting season"),
+  })
+  .strict();
+
 // ---------------------------------------------------------------------------
 // Pagination
 // ---------------------------------------------------------------------------
@@ -247,8 +432,9 @@ export const overviewViewSchema = z
   .object({
     ...viewEnvelopeSchema,
     view: z.literal("overview"),
-    status: z.enum(["active", "ended"]),
+    status: z.enum(["active", "ended", "quarantined"]),
     day: z.number().int().optional(),
+    employmentStatus: z.enum(["employed", "fired", "unknown"]).optional(),
     userTeam: teamSummarySchema,
     rosterCount: z.number().int().nonnegative(),
     rosterExcerpt: z.array(playerSummarySchema),
@@ -277,6 +463,8 @@ export const financesViewSchema = z
     salaryCap: z.number(),
     capSpace: z.number(),
     luxuryTaxThreshold: z.number(),
+    minContract: z.number(),
+    maxContract: z.number(),
     hardCapActive: z.boolean(),
   })
   .strict();
@@ -314,6 +502,7 @@ export const draftViewSchema = z
     view: z.literal("draft"),
     prospects: z.array(prospectSummarySchema),
     prospectPage: pageMetaSchema,
+    draftPicks: z.array(draftPickSummarySchema),
     ownedPicks: z.array(draftPickSummarySchema),
   })
   .strict();
@@ -471,8 +660,23 @@ export const advanceTargetSchema = z.enum([
   "next_decision",
   "days",
   "games",
+  "week",
+  "month",
+  "one_pick",
   "phase",
   "season_end",
+  "until_all_star_game",
+  "until_trade_deadline",
+  "until_playoffs",
+  "until_end_of_round",
+  "until_end_of_play_in",
+  "through_playoffs",
+  "until_draft",
+  "until_next_pick",
+  "until_resign_players",
+  "until_free_agency",
+  "until_preseason",
+  "until_regular_season",
 ]);
 
 export const advanceCountSchema = z
@@ -520,6 +724,13 @@ export const mutationResultSchema = z
   })
   .strict();
 
+export const idempotencyRecordSchema = z
+  .object({
+    fingerprint: z.string().length(64),
+    result: mutationResultSchema,
+  })
+  .strict();
+
 export const checkpointSchema = z
   .object({
     checkpointId: z.string(),
@@ -530,35 +741,39 @@ export const checkpointSchema = z
   })
   .strict();
 
-export const checkpointActionInputSchema = z.discriminatedUnion("action", [
-  z
-    .object({ action: z.literal("create"), episodeId: episodeIdSchema })
-    .strict(),
-  z.object({ action: z.literal("list"), episodeId: episodeIdSchema }).strict(),
-  z
-    .object({
-      action: z.literal("restore"),
-      episodeId: episodeIdSchema,
-      checkpointId: z
-        .string()
-        .min(1)
-        .max(100)
-        .describe(
-          "Opaque checkpoint ID from bbgm_checkpoint(action=create/list)",
-        ),
-      expectedRevision: expectedRevisionSchema,
-      idempotencyKey: idempotencyKeySchema,
-    })
-    .strict(),
-]);
+export const createCheckpointInputSchema = z
+  .object({ episodeId: episodeIdSchema })
+  .strict();
 
-export const checkpointResultSchema = z
+export const listCheckpointsInputSchema = z
+  .object({ episodeId: episodeIdSchema })
+  .strict();
+
+export const restoreCheckpointInputSchema = z
   .object({
-    action: z.enum(["create", "list", "restore"]),
-    checkpoint: checkpointSchema.optional(),
-    checkpoints: z.array(checkpointSchema).optional(),
-    mutation: mutationResultSchema.optional(),
+    episodeId: episodeIdSchema,
+    checkpointId: z
+      .string()
+      .min(1)
+      .max(100)
+      .describe(
+        "Opaque checkpoint ID from bbgm_create_checkpoint or bbgm_list_checkpoints",
+      ),
+    expectedRevision: expectedRevisionSchema,
+    idempotencyKey: idempotencyKeySchema,
   })
+  .strict();
+
+export const createCheckpointResultSchema = z
+  .object({ checkpoint: checkpointSchema })
+  .strict();
+
+export const listCheckpointsResultSchema = z
+  .object({ checkpoints: z.array(checkpointSchema) })
+  .strict();
+
+export const restoreCheckpointResultSchema = z
+  .object({ mutation: mutationResultSchema })
   .strict();
 
 // ---------------------------------------------------------------------------
@@ -581,6 +796,11 @@ export const createEpisodeInputSchema = z
       .describe("Team controlled by the agent"),
     startingSeason: z.number().int().min(1900).max(2200).default(2026),
     constraints: scenarioConstraintSpecSchema.optional(),
+    scenarioPolicy: scenarioPolicySchema.optional(),
+    initialSnapshot: z
+      .unknown()
+      .optional()
+      .describe("Evaluator-only starting engine snapshot"),
   })
   .strict();
 

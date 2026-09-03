@@ -40,6 +40,7 @@ export const registerExecuteTrade = (
             expectedRevision,
             idempotencyKey,
           }),
+          mutationResultSchema,
         );
       } catch (error) {
         return failure(error);

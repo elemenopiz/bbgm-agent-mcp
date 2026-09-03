@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "open-model-manifest.v1",
+  "modelId": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "source": "Hugging Face snapshot_download",
+  "runtime": {
+    "server": "scripts/serve-local-open-model.py",
+    "decoding": {
+      "temperature": 0,
+      "doSample": false,
+      "maxNewTokens": 96
+    }
+  },
+  "note": "Weights are not redistributed in this repository; reproduce by downloading this immutable revision in an environment that accepts the model's terms."
+}

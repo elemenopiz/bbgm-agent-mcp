@@ -16,6 +16,8 @@ export type SnapshotStore = {
     snapshot: unknown,
   ): Promise<void>;
   read(episodeId: string, checkpointId: string): Promise<unknown>;
+  writeCurrent(episodeId: string, snapshot: unknown): Promise<void>;
+  readCurrent(episodeId: string): Promise<unknown>;
   writeFinal(episodeId: string, snapshot: unknown): Promise<string>;
 };
 
@@ -24,6 +26,8 @@ export const createFileSnapshotStore = (dataRoot: string): SnapshotStore => {
     join(dataRoot, "episodes", episodeId, "checkpoints");
   const checkpointPath = (episodeId: string, checkpointId: string): string =>
     join(episodeDir(episodeId), `${checkpointId}.json`);
+  const currentSnapshotPath = (episodeId: string): string =>
+    join(dataRoot, "episodes", episodeId, "current-snapshot.json");
 
   return {
     async write(episodeId, checkpointId, snapshot) {
@@ -37,6 +41,16 @@ export const createFileSnapshotStore = (dataRoot: string): SnapshotStore => {
         checkpointPath(episodeId, checkpointId),
         "utf8",
       );
+      return JSON.parse(raw) as unknown;
+    },
+    async writeCurrent(episodeId, snapshot) {
+      await atomicWriteFile(
+        currentSnapshotPath(episodeId),
+        JSON.stringify(snapshot),
+      );
+    },
+    async readCurrent(episodeId) {
+      const raw = await readFile(currentSnapshotPath(episodeId), "utf8");
       return JSON.parse(raw) as unknown;
     },
     async writeFinal(episodeId, snapshot) {

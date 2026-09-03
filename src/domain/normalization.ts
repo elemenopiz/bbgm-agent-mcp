@@ -54,7 +54,17 @@ type EnvelopeInput = {
   state: EngineRawState;
 };
 
-/** Well-known evaluators for scenario-declared soft objectives. Unregistered codes report 0. */
+export const SUPPORTED_OBJECTIVE_CODES = [
+  "MAXIMIZE_WINS",
+  "MAXIMIZE_CAP_SPACE",
+  "MINIMIZE_ROSTER_CHURN",
+  "PRESERVE_DRAFT_CAPITAL",
+] as const;
+
+export const isSupportedObjectiveCode = (code: string): boolean =>
+  (SUPPORTED_OBJECTIVE_CODES as readonly string[]).includes(code);
+
+/** Well-known evaluators for scenario-declared soft objectives. */
 const evaluateObjectiveValue = (
   code: string,
   state: EngineRawState,
@@ -91,6 +101,8 @@ export const buildOverviewView = (
   input: EnvelopeInput,
   status: EpisodeStatus,
   constraints: ConstraintStatus[],
+  allowedActions?: readonly string[],
+  allowedInformation?: readonly string[],
 ): OverviewView => ({
   schemaVersion: STATE_SCHEMA_VERSION,
   view: "overview",
@@ -101,6 +113,9 @@ export const buildOverviewView = (
   phase: input.state.phase,
   status,
   ...(input.state.day === undefined ? {} : { day: input.state.day }),
+  ...(input.state.employmentStatus === undefined
+    ? {}
+    : { employmentStatus: input.state.employmentStatus }),
   userTeam: input.state.userTeam,
   rosterCount: input.state.roster.length,
   rosterExcerpt: [...input.state.roster]
@@ -108,7 +123,19 @@ export const buildOverviewView = (
     .slice(0, ROSTER_EXCERPT_SIZE),
   ownedPickCount: input.state.ownedPicks.length,
   constraintsSatisfied: constraints.every((c) => c.satisfied),
-  legalActionCategories: input.state.legalActionCategories,
+  legalActionCategories: input.state.legalActionCategories.filter((action) => {
+    if (allowedActions === undefined || allowedInformation === undefined)
+      return true;
+    if (action === "get_state") return allowedInformation.length > 0;
+    if (action === "get_options") return allowedInformation.includes("options");
+    if (action === "checkpoint")
+      return [
+        "create_checkpoint",
+        "list_checkpoints",
+        "restore_checkpoint",
+      ].some((candidate) => allowedActions.includes(candidate));
+    return allowedActions.includes(action);
+  }),
   nextDecision: input.state.nextDecision,
 });
 
@@ -148,6 +175,8 @@ const buildFinancesView = (input: EnvelopeInput): FinancesView => ({
   capSpace: input.state.userTeam.capSpace,
   luxuryTaxThreshold: input.state.userTeam.luxuryTaxThreshold,
   hardCapActive: input.state.userTeam.hardCapActive,
+  minContract: input.state.userTeam.minContract,
+  maxContract: input.state.userTeam.maxContract,
 });
 
 const buildStandingsView = (
@@ -223,6 +252,9 @@ const buildDraftView = (
     phase: input.state.phase,
     prospects: page,
     prospectPage: meta,
+    draftPicks: [...input.state.draftPicks].sort(
+      (a, b) => a.season - b.season || a.round - b.round || a.dpid - b.dpid,
+    ),
     ownedPicks: input.state.ownedPicks,
   };
 };
@@ -282,6 +314,8 @@ export type ViewContext = {
   status: EpisodeStatus;
   constraints: ConstraintStatus[];
   objectives: ObjectiveStatus[];
+  allowedActions?: readonly string[];
+  allowedInformation?: readonly string[];
   cursor?: number;
   limit?: number;
   /** Set when view="roster" is reading a team other than the user's own -- see DomainService.getState. */
@@ -295,7 +329,13 @@ export const buildView = (
 ): LeagueStateView => {
   switch (view) {
     case "overview":
-      return buildOverviewView(input, context.status, context.constraints);
+      return buildOverviewView(
+        input,
+        context.status,
+        context.constraints,
+        context.allowedActions,
+        context.allowedInformation,
+      );
     case "roster":
       return buildRosterView(
         input,

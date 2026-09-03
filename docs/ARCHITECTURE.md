@@ -22,8 +22,9 @@ they are. It complements [docs/ENGINE_INTEGRATION.md](ENGINE_INTEGRATION.md)
                                  │
 ┌───────────────────────────────▼─────────────────────────────────┐
 │ 4. DomainService (src/domain/DomainService.ts)                   │
-│    Legality/phase checks, revision + idempotency bookkeeping,    │
-│    invariant evaluation, rollback-on-failure, trajectory logging.│
+│    Legality/phase checks, revision + durable idempotency          │
+│    bookkeeping, invariant evaluation, rollback-on-failure,        │
+│    trajectory and attempt logging.                                │
 │    The one place both layer 5 and layer 6 funnel through, so     │
 │    an LLM agent and a scripted evaluation run see identical      │
 │    semantics.                                                    │
@@ -31,9 +32,10 @@ they are. It complements [docs/ENGINE_INTEGRATION.md](ENGINE_INTEGRATION.md)
                                  │
 ┌───────────────────────────────▼─────────────────────────────────┐
 │ 3. Episode / session manager (src/sessions/)                     │
-│    EpisodeManager + EpisodeStore: owns episode lifecycle, one    │
-│    engine instance per episode, and the per-episode serialized   │
-│    command queue. No business rules live here either.            │
+│    EpisodeManager + EpisodeStore: owns episode lifecycle, durable │
+│    metadata/resume, one engine instance per episode, and the      │
+│    per-episode serialized command queue. No business rules live   │
+│    here either.                                                   │
 └───────────────────────────────┬─────────────────────────────────┘
                                  │
 ┌───────────────────────────────▼─────────────────────────────────┐
@@ -91,6 +93,7 @@ sequenceDiagram
     participant Episode as EpisodeManager/EpisodeStore (layer 3)
     participant Engine as SimulationEngine (worker thread)
     participant Traj as TrajectoryWriter (persistence)
+    participant Audit as AttemptWriter (persistence)
 
     Agent->>Tool: bbgm_execute_trade(input)
     Tool->>Tool: Zod inputSchema.parse (reject on VALIDATION_ERROR)
@@ -113,6 +116,7 @@ sequenceDiagram
     else invariants satisfied
         Domain->>Domain: revision += 1; compute stateHash
         Domain->>Traj: append trajectory record (pre/post hash, action, events, invariants)
+        Domain->>Audit: append accepted attempt with revision/key/outcome
         Domain-->>Tool: MutationResult
     end
     Tool-->>Agent: {content, structuredContent} or {content, isError: true}
@@ -124,7 +128,7 @@ serialized command queue → the engine call inside its worker thread →
 post-mutation invariant checks → rollback-on-failure if a hard invariant
 failed → revision increment → trajectory append → normalized response.**
 Read-only tools (`bbgm_get_state`, `bbgm_get_options`,
-`bbgm_evaluate_trade`, `bbgm_checkpoint` with `action="list"`) take the same
+`bbgm_evaluate_trade`, and `bbgm_list_checkpoints`) take the same
 path minus the expectedRevision check, the snapshot/rollback machinery, and
 the revision increment — they still run on the same per-episode queue as
 mutations, so a read is never interleaved mid-mutation.

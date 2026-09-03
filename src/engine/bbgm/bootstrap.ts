@@ -100,13 +100,33 @@ export function createSourceDirFetch(
  * leak into another's: there is no shared process, only a shared source
  * file.
  */
-export function installSeededRandom(seed: string): void {
+export type SeededRandomController = {
+  readonly algorithm: "xorshift32-v1";
+  getState(): number;
+  setState(state: number): void;
+};
+
+export function installSeededRandom(seed: string): SeededRandomController {
   let state = hashSeedToUint32(seed);
   Math.random = (): number => {
     state ^= state << 13;
     state ^= state >>> 17;
     state ^= state << 5;
     return (state >>> 0) / 0x1_0000_0000;
+  };
+  return {
+    algorithm: "xorshift32-v1",
+    getState: () => state >>> 0,
+    setState: (nextState: number) => {
+      if (
+        !Number.isSafeInteger(nextState) ||
+        nextState <= 0 ||
+        nextState > 0xffffffff
+      ) {
+        throw new Error(`Invalid xorshift32 state: ${String(nextState)}`);
+      }
+      state = nextState >>> 0;
+    },
   };
 }
 

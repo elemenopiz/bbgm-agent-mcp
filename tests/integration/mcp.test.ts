@@ -36,12 +36,17 @@ afterEach(async () => {
 });
 
 describe("MCP server", () => {
-  test("lists all 13 tools, each with an input and output schema", async () => {
+  test("lists all 17 tools, each with an input and output schema", async () => {
     const listed = await client.listTools();
     const expectedNames = [
       "bbgm_create_episode",
+      "bbgm_resume_episode",
+      "bbgm_create_checkpoint",
+      "bbgm_list_checkpoints",
+      "bbgm_restore_checkpoint",
       "bbgm_get_state",
       "bbgm_get_options",
+      "bbgm_get_player",
       "bbgm_evaluate_trade",
       "bbgm_execute_trade",
       "bbgm_set_lineup",
@@ -50,7 +55,6 @@ describe("MCP server", () => {
       "bbgm_sign_free_agent",
       "bbgm_make_draft_pick",
       "bbgm_advance",
-      "bbgm_checkpoint",
       "bbgm_end_episode",
     ];
     const names = listed.tools.map((tool) => tool.name);
@@ -105,6 +109,106 @@ describe("MCP server", () => {
       arguments: { episodeId: overview.episodeId, exportFinalSnapshot: false },
     });
     expect(ended.isError).not.toBe(true);
+  });
+
+  test("public episodes expose milestone time controls, not open-ended stepping", async () => {
+    const created = await client.callTool({
+      name: "bbgm_create_episode",
+      arguments: {
+        scenarioId: "mcp-milestone-policy",
+        seed: "milestone-policy-seed",
+        userTeamId: 0,
+        startingSeason: 2026,
+      },
+    });
+    expect(created.isError).not.toBe(true);
+    const episodeId = (created.structuredContent as { episodeId: string })
+      .episodeId;
+
+    const options = await client.callTool({
+      name: "bbgm_get_options",
+      arguments: { episodeId },
+    });
+    expect(options.isError).not.toBe(true);
+    const advanceTargets = (
+      (
+        options.structuredContent as {
+          options: { type: string; target?: string }[];
+        }
+      ).options ?? []
+    )
+      .filter((option) => option.type === "advance")
+      .map((option) => option.target);
+    expect(advanceTargets).toContain("until_trade_deadline");
+    expect(advanceTargets).toContain("days");
+    expect(advanceTargets).toContain("games");
+    expect(advanceTargets).toContain("week");
+    expect(advanceTargets).toContain("month");
+    expect(advanceTargets).toContain("one_pick");
+    expect(advanceTargets).toContain("phase");
+    expect(advanceTargets).toContain("season_end");
+  });
+
+  test("keeps checkpoint create/list read semantics separate from restore mutation", async () => {
+    const created = await client.callTool({
+      name: "bbgm_create_episode",
+      arguments: {
+        scenarioId: "mcp-checkpoint",
+        seed: "checkpoint-seed",
+        userTeamId: 0,
+        startingSeason: 2026,
+      },
+    });
+    const overview = created.structuredContent as {
+      episodeId: string;
+      revision: number;
+    };
+
+    const createdCheckpoint = await client.callTool({
+      name: "bbgm_create_checkpoint",
+      arguments: { episodeId: overview.episodeId },
+    });
+    expect(createdCheckpoint.isError).not.toBe(true);
+    const checkpoint = (
+      createdCheckpoint.structuredContent as {
+        checkpoint: { checkpointId: string };
+      }
+    ).checkpoint;
+
+    const advanced = await client.callTool({
+      name: "bbgm_advance",
+      arguments: {
+        episodeId: overview.episodeId,
+        expectedRevision: 0,
+        idempotencyKey: "checkpoint-advance-1",
+        target: "next_game",
+      },
+    });
+    expect(advanced.isError).not.toBe(true);
+
+    const listed = await client.callTool({
+      name: "bbgm_list_checkpoints",
+      arguments: { episodeId: overview.episodeId },
+    });
+    expect(listed.isError).not.toBe(true);
+    expect(
+      (listed.structuredContent as { checkpoints: unknown[] }).checkpoints,
+    ).toHaveLength(1);
+
+    const restored = await client.callTool({
+      name: "bbgm_restore_checkpoint",
+      arguments: {
+        episodeId: overview.episodeId,
+        checkpointId: checkpoint.checkpointId,
+        expectedRevision: 1,
+        idempotencyKey: "checkpoint-restore-1",
+      },
+    });
+    expect(restored.isError).not.toBe(true);
+    expect(
+      (restored.structuredContent as { mutation: { revision: number } })
+        .mutation.revision,
+    ).toBe(2);
   });
 
   test("returns a stable error code for a stale revision instead of throwing a transport error", async () => {

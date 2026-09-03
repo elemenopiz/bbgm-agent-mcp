@@ -13,6 +13,9 @@ release yet; the current package version is `0.1.0`.
 
 ### Added
 
+- **Grant evidence verification**: append-only attempt telemetry, explicit
+  rollback trajectory nodes, a fail-closed evidence verifier, and a canonical
+  five-seed grant-demo bundle with reviewer summary output.
 - **Domain contract** (`src/domain/`): transport-independent `SimulationEngine`
   interface, typed episode/state/mutation shapes, Zod v4 schemas for every
   tool input/output, canonical-JSON SHA-256 state hashing, built-in
@@ -22,7 +25,7 @@ release yet; the current package version is `0.1.0`.
   revision/idempotency bookkeeping, rollback-on-invariant-failure, and
   trajectory logging in one place shared by both the MCP tool layer and the
   offline research/evaluation layer.
-- **MCP tool catalog**: 13 `bbgm_*` tools covering episode lifecycle
+- **MCP tool catalog**: 16 `bbgm_*` tools covering episode lifecycle
   (create/end), observation (`get_state` with 10 bounded, paginated views,
   including any team's public roster via an optional `teamId` -- needed to
   actually construct a trade proposal; `get_options`), trade evaluation and
@@ -74,3 +77,18 @@ release yet; the current package version is `0.1.0`.
   third-party licensing disclosure; a wrapper-only MIT license; contributor
   guide; and a GitHub Actions CI workflow (format, lint, typecheck, test,
   build — engine-independent only).
+
+### Changed
+
+- **Real-engine snapshot fidelity**: transaction history is read from the
+  durable Basketball GM events store after restore, preserving exact state
+  hashes through rollback and restart; the real-engine smoke test now checks
+  the complete canonical state hash across snapshot round trips.
+- **CI/release evidence**: hosted CI now uses the repository's `.nvmrc`, the
+  exact pnpm version declared by `package.json`, read-only repository
+  permissions, superseded-run cancellation, an explicit real-engine skip
+  boundary, and a tracked-file cleanliness check after the build.
+- Added the grant-facing [release checklist](docs/RELEASE_CHECKLIST.md),
+  including the pinned-engine/license boundary, reproducibility metadata,
+  artifact-hygiene checks, versioning discipline, and required
+  `research-preview` labeling. No public release is claimed by this entry.

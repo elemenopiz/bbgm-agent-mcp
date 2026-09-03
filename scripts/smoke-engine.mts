@@ -12,9 +12,11 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
 import { BasketballGmEngine } from "../src/engine/bbgm/BasketballGmEngine.js";
+import { stateHash } from "../src/domain/stateHash.js";
 import type { CreateEpisodeInput, EngineEvent } from "../src/domain/types.js";
 
 const root = resolve(import.meta.dirname, "..");
+const SMOKE_STARTING_SEASON = 2026;
 
 const sourceDirEnv = process.env["BBGM_SOURCE_DIR"];
 if (!sourceDirEnv) {
@@ -73,7 +75,7 @@ async function runSpike(): Promise<void> {
       scenarioId: "engine-smoke-test",
       seed: "engine-smoke-seed-1",
       userTeamId: 0,
-      startingSeason: new Date().getFullYear(),
+      startingSeason: SMOKE_STARTING_SEASON,
       constraints: { hard: [], soft: [] },
     };
 
@@ -86,7 +88,7 @@ async function runSpike(): Promise<void> {
     console.error(
       `season=${state1.season} phase=${state1.phase} userTeam=${state1.userTeam.name} ` +
         `(${state1.userTeam.abbrev}) roster=${state1.roster.length} freeAgents=${state1.freeAgents.length} ` +
-        `ownedPicks=${state1.ownedPicks.length} standings=${state1.standings.length} ` +
+        `ownedPicks=${state1.ownedPicks.length} draftPicks=${state1.draftPicks.length} standings=${state1.standings.length} ` +
         `schedule=${state1.schedule.length} payroll=${state1.userTeam.payroll.toFixed(1)}M ` +
         `capSpace=${state1.userTeam.capSpace.toFixed(1)}M nextDecision=${state1.nextDecision}`,
     );
@@ -94,6 +96,11 @@ async function runSpike(): Promise<void> {
       throw new Error(
         "Spike check failed: user roster is empty after create()",
       );
+    if (state1.draftPicks.length < state1.ownedPicks.length) {
+      throw new Error(
+        "Spike check failed: complete draft-pick ledger is smaller than the user's owned-pick subset",
+      );
+    }
     const firstPlayer = state1.roster[0];
     if (firstPlayer) {
       console.error(
@@ -112,6 +119,18 @@ async function runSpike(): Promise<void> {
     const gameEvents = await engine.advance({ target: "next_game" });
     summarize("next_game", gameEvents);
 
+    console.error("\n=== 4b. advance({ target: 'until_trade_deadline' }) ===");
+    const deadlineEvents = await engine.advance({
+      target: "until_trade_deadline",
+    });
+    summarize("until_trade_deadline", deadlineEvents);
+    const deadlineState = await engine.getRawState();
+    if (deadlineState.phase !== "regular_season") {
+      throw new Error(
+        `Spike check failed: trade-deadline milestone ended in ${deadlineState.phase}`,
+      );
+    }
+
     console.error("\n=== 5. advance through one full season (bounded) ===");
     const seasonAtStart = (await engine.getRawState()).season;
     let steps = 0;
@@ -127,7 +146,10 @@ async function runSpike(): Promise<void> {
       console.error(
         `  step ${steps + 1}: phase -> ${afterState.phase} (season ${afterState.season}), stop reason: ${stoppedReason}`,
       );
-      if (stoppedReason === "blocked_pending_decision") {
+      if (
+        stoppedReason === "blocked_pending_decision" &&
+        afterState.phase === "draft"
+      ) {
         // A pending user draft pick -- auto-pick the top prospect so the
         // bounded season loop can keep moving, mirroring what an LLM GM
         // acting on get_options() would do.
@@ -142,16 +164,31 @@ async function runSpike(): Promise<void> {
         );
         const draftEvents = await engine.makeDraftPick({ pid: prospect.pid });
         summarize("makeDraftPick", draftEvents);
+      } else if (stoppedReason === "blocked_pending_decision") {
+        // Resigning negotiations are intentionally never auto-resolved by
+        // the adapter. Stop the smoke walk here and verify snapshot behavior
+        // at this safe decision boundary instead of silently choosing terms.
+        console.error(
+          `  stopping at ${afterState.nextDecision}; the adapter requires an explicit contract decision`,
+        );
+        break;
       }
       if (afterState.season !== seasonAtStart) break;
     }
+    const seasonAfterWalk = (await engine.getRawState()).season;
     if (steps >= BOUND_SEASON_ADVANCE_STEPS) {
       console.error(
         `  WARNING: hit the ${BOUND_SEASON_ADVANCE_STEPS}-step bound without completing a season transition`,
       );
+    } else if (seasonAfterWalk === seasonAtStart) {
+      console.error(
+        `  season walk stopped safely at a required ${
+          (await engine.getRawState()).nextDecision
+        } decision before crossing the season boundary`,
+      );
     } else {
       console.error(
-        `  season advanced ${seasonAtStart} -> ${(await engine.getRawState()).season} in ${steps + 1} phase step(s)`,
+        `  season advanced ${seasonAtStart} -> ${seasonAfterWalk} in ${steps + 1} phase step(s)`,
       );
     }
 
@@ -164,6 +201,7 @@ async function runSpike(): Promise<void> {
     await engine.importSnapshot(snapshot);
     const afterSnapshotState = await engine.getRawState();
     const consistent =
+      stateHash(beforeSnapshotState) === stateHash(afterSnapshotState) &&
       afterSnapshotState.season === beforeSnapshotState.season &&
       afterSnapshotState.phase === beforeSnapshotState.phase &&
       afterSnapshotState.roster.length === beforeSnapshotState.roster.length;

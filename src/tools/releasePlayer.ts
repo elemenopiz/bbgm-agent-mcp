@@ -41,6 +41,7 @@ export const registerReleasePlayer = (
             { pid },
             { expectedRevision, idempotencyKey },
           ),
+          mutationResultSchema,
         );
       } catch (error) {
         return failure(error);

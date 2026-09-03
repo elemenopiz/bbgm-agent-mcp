@@ -6,6 +6,7 @@ import {
   overviewViewSchema,
   scenarioConstraintSpecSchema,
 } from "../domain/schemas.js";
+import { PUBLIC_MCP_ALLOWED_ADVANCE_TARGETS } from "../domain/types.js";
 import { toolAnnotations } from "../server/errors.js";
 import { failure, success } from "../server/results.js";
 
@@ -18,7 +19,7 @@ export const registerCreateEpisode = (
     {
       title: "Create Basketball GM Episode",
       description:
-        "Create an isolated, seeded research episode running in its own worker and return its initial normalized overview state. Call this before any other bbgm_* tool; save the returned episodeId and revision.",
+        "Create an isolated, seeded research episode running in its own worker and return its initial normalized overview state. Public episodes preserve the full typed BBGM pacing surface with a 300-step and 2-season budget; automatic draft-end completion is intentionally excluded. Call this before any other bbgm_* tool; save the returned episodeId and revision.",
       inputSchema: z
         .object({
           scenarioId: z
@@ -54,7 +55,17 @@ export const registerCreateEpisode = (
     },
     async (input) => {
       try {
-        return success(await domain.createEpisode(input));
+        return success(
+          await domain.createEpisode({
+            ...input,
+            scenarioPolicy: {
+              allowedAdvanceTargets: [...PUBLIC_MCP_ALLOWED_ADVANCE_TARGETS],
+              maxSteps: 300,
+              horizonSeasons: 2,
+            },
+          }),
+          overviewViewSchema,
+        );
       } catch (error) {
         return failure(error);
       }

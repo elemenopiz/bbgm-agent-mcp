@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { DomainService } from "../../src/domain/DomainService.js";
 import { createFileSnapshotStore } from "../../src/persistence/snapshots.js";
 import { createServer } from "../../src/server/createServer.js";
+import { failure, success } from "../../src/server/results.js";
 import { EpisodeManager } from "../../src/sessions/EpisodeManager.js";
 import { FakeSimulationEngine } from "../fixtures/FakeSimulationEngine.js";
 
@@ -35,14 +36,16 @@ afterEach(async () => {
   await rm(dataRoot, { recursive: true, force: true });
 });
 
-/** Every mutating tool except bbgm_create_episode requires the standard mutation-safety envelope. */
+/** Every state-mutating tool except the lifecycle tools requires the standard mutation-safety envelope. */
 const MUTATION_SAFETY_EXEMPT = new Set([
   "bbgm_create_episode",
+  "bbgm_resume_episode",
   "bbgm_get_state",
   "bbgm_get_options",
+  "bbgm_get_player",
   "bbgm_evaluate_trade",
-  // discriminated union (create/list/restore); its own dedicated test below checks the restore branch
-  "bbgm_checkpoint",
+  "bbgm_create_checkpoint",
+  "bbgm_list_checkpoints",
   // terminal lifecycle action, not a revision-bearing state mutation -- idempotent by construction
   // (ending an already-ended episode fails closed with ILLEGAL_ACTION rather than needing a replay key)
   "bbgm_end_episode",
@@ -51,10 +54,51 @@ const MUTATION_SAFETY_EXEMPT = new Set([
 const READ_ONLY_TOOLS = new Set([
   "bbgm_get_state",
   "bbgm_get_options",
+  "bbgm_get_player",
   "bbgm_evaluate_trade",
+  "bbgm_list_checkpoints",
 ]);
 
+const NON_DESTRUCTIVE_TOOLS = new Set([
+  "bbgm_create_episode",
+  "bbgm_create_checkpoint",
+]);
+
+const EXPECTED_TOOL_NAMES = [
+  "bbgm_create_episode",
+  "bbgm_resume_episode",
+  "bbgm_create_checkpoint",
+  "bbgm_list_checkpoints",
+  "bbgm_restore_checkpoint",
+  "bbgm_get_state",
+  "bbgm_get_options",
+  "bbgm_get_player",
+  "bbgm_evaluate_trade",
+  "bbgm_execute_trade",
+  "bbgm_set_lineup",
+  "bbgm_release_player",
+  "bbgm_negotiate_contract",
+  "bbgm_sign_free_agent",
+  "bbgm_make_draft_pick",
+  "bbgm_advance",
+  "bbgm_end_episode",
+];
+
 describe("tool catalog contract", () => {
+  test("registers the fixed catalog in deterministic order", async () => {
+    const first = await client.listTools();
+    const second = await client.listTools();
+    expect(first.tools.map((tool) => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
+    expect(second.tools.map((tool) => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
+    expect(new Set(EXPECTED_TOOL_NAMES).size).toBe(EXPECTED_TOOL_NAMES.length);
+  });
+
+  test("advertises a static tools capability without list-change notifications", () => {
+    expect(client.getServerCapabilities()?.tools).toEqual({
+      listChanged: false,
+    });
+  });
+
   test("openWorldHint is false for every tool (no unbounded external I/O)", async () => {
     const listed = await client.listTools();
     for (const tool of listed.tools) {
@@ -68,6 +112,16 @@ describe("tool catalog contract", () => {
       READ_ONLY_TOOLS.has(t.name),
     )) {
       expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+      expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
+    }
+  });
+
+  test("non-destructive lifecycle tools are not mislabeled read-only", async () => {
+    const listed = await client.listTools();
+    for (const tool of listed.tools.filter((t) =>
+      NON_DESTRUCTIVE_TOOLS.has(t.name),
+    )) {
+      expect(tool.annotations?.readOnlyHint, tool.name).toBe(false);
       expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
     }
   });
@@ -90,16 +144,23 @@ describe("tool catalog contract", () => {
     }
   });
 
-  test("bbgm_checkpoint's action=restore branch is the only branch requiring the mutation envelope", async () => {
+  test("bbgm_restore_checkpoint requires the mutation envelope", async () => {
     const listed = await client.listTools();
-    const checkpoint = listed.tools.find((t) => t.name === "bbgm_checkpoint");
+    const checkpoint = listed.tools.find(
+      (t) => t.name === "bbgm_restore_checkpoint",
+    );
     expect(checkpoint).toBeDefined();
-    // discriminated union -> anyOf/oneOf branches in the converted JSON schema
     const schema = checkpoint!.inputSchema as {
-      anyOf?: unknown[];
-      oneOf?: unknown[];
+      properties?: Record<string, unknown>;
     };
-    expect((schema.anyOf ?? schema.oneOf)?.length).toBe(3);
+    for (const field of [
+      "episodeId",
+      "checkpointId",
+      "expectedRevision",
+      "idempotencyKey",
+    ]) {
+      expect(schema.properties?.[field]).toBeDefined();
+    }
   });
 
   test("every tool's output schema is an object type", async () => {
@@ -108,6 +169,62 @@ describe("tool catalog contract", () => {
       const schema = tool.outputSchema as { type?: string } | undefined;
       expect(schema?.type, tool.name).toBe("object");
     }
+  });
+
+  test("server result helpers enforce output schemas and sanitize failures", () => {
+    expect(() =>
+      success({}, { safeParse: () => ({ success: false }) }),
+    ).toThrow("failed its declared output schema");
+
+    const rawFailure = Object.assign(
+      new Error("/private/engine/path stack trace should not escape"),
+      { code: "ENGINE_ERROR" },
+    );
+    const failureResult = failure(rawFailure);
+    const failureText =
+      (failureResult.content as { type: string; text?: string }[])[0]?.text ??
+      "";
+    expect(JSON.parse(failureText)).toEqual({
+      error: {
+        code: "ENGINE_ERROR",
+        message: "Internal engine error",
+        retryable: false,
+      },
+    });
+
+    const structuredFailure = failure(
+      Object.assign(new Error("Player refuses this offer"), {
+        code: "ILLEGAL_ACTION",
+        retryable: false,
+        details: { pid: 42, reason: "upstream_negotiation_preflight_rejected" },
+      }),
+    );
+    const structuredText =
+      (structuredFailure.content as { type: string; text?: string }[])[0]
+        ?.text ?? "";
+    expect(JSON.parse(structuredText)).toEqual({
+      error: {
+        code: "ILLEGAL_ACTION",
+        message: "Player refuses this offer",
+        retryable: false,
+        details: { pid: 42, reason: "upstream_negotiation_preflight_rejected" },
+      },
+    });
+
+    const timeoutResult = failure(
+      Object.assign(new Error("/private/engine/path"), { code: "TIMEOUT" }),
+    );
+    const timeoutText =
+      (timeoutResult.content as { type: string; text?: string }[])[0]?.text ??
+      "";
+    expect(JSON.parse(timeoutText)).toMatchObject({
+      error: {
+        code: "TIMEOUT",
+        retryable: true,
+        message:
+          "The engine worker timed out; resume the quarantined episode before retrying",
+      },
+    });
   });
 
   test("an illegal action surfaces a stable ILLEGAL_ACTION code, not a raw engine error", async () => {

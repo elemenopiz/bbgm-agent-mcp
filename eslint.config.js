@@ -93,6 +93,12 @@ export default tseslint.config(
       "@typescript-eslint/no-explicit-any": "off",
     },
   },
+  {
+    // The build-clean helper is plain Node ESM and intentionally sits outside
+    // the TypeScript project; lint its syntax without project-service rules.
+    files: ["scripts/**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+  },
   // Must stay last: turns off stylistic rules that would otherwise conflict
   // with Prettier's formatting decisions.
   eslintConfigPrettier,

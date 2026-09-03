@@ -99,7 +99,7 @@ describe("full-season smoke episode (fake engine)", () => {
       const trajectory = await readTrajectory(
         trajectoryPathFor(dataRoot, overview.episodeId),
       );
-      expect(trajectory.length).toBe(mutations + 2); // + create_episode + end_episode
+      expect(trajectory.length).toBe(mutations + 3); // + create_episode + final checkpoint + end_episode
       expect(trajectory.at(0)?.step).toBe("create_episode");
       expect(trajectory.at(-1)?.step).toBe("end_episode");
       expect(trajectory.map((record) => record.sequence)).toEqual(

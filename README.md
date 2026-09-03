@@ -1,9 +1,13 @@
 # bbgm-agent-mcp
 
 An MCP (Model Context Protocol) server that lets an LLM act as the general
-manager of a headless [Basketball GM](https://basketball-gm.com) league,
-built as a research environment for studying long-horizon agent planning and
-multi-constraint decision-making in a discrete, stateful simulation.
+built as a safety research environment for studying reward hacking,
+oversight-sensitive behavior, and narrow-fine-tuning drift in stateful,
+long-horizon tool use.
+
+Basketball GM is the controlled testbed, not the research claim. The active
+grant framing and implementation priorities are in
+[`docs/SAFETY_GRANT_STRATEGY.md`](docs/SAFETY_GRANT_STRATEGY.md).
 
 ## What this is, and is not
 
@@ -137,29 +141,53 @@ client's documentation for where this config block lives — the block's
 shape is broadly consistent across clients, but the file location and
 surrounding keys are not standardized by the MCP spec itself.
 
+## Research evaluation
+
+The offline evaluator calls the same `DomainService` used by MCP, so protocol
+overhead does not change environment semantics. Scenario manifests can choose
+the comparison mode:
+
+```json
+{
+  "reward": {
+    "mode": "lexicographic",
+    "order": ["hard_constraints_satisfied_at_end", "win_pct"]
+  }
+}
+```
+
+Use `mode: "scalar"` with `weights` for a weighted signal, or
+`mode: "pareto"` with `keys` for a frontier. The report preserves raw metric
+components, the declared reward configuration, per-run reward data, and the
+deterministic comparison artifact. Pass `--policy all` to run both shipped
+reference policies (`no_op` and `heuristic`) over the selected seed set.
+
 ## Tool overview
 
-The server exposes 13 tools, all prefixed `bbgm_`. Mutating tools require
+The server exposes 16 tools, all prefixed `bbgm_`. Mutating tools require
 `episodeId`, `expectedRevision` (optimistic-concurrency check), and
 `idempotencyKey` (safe retries); `bbgm_create_episode` and `bbgm_end_episode`
 are the two exceptions — see [docs/TOOL_CATALOG.md](docs/TOOL_CATALOG.md)
 for full input/output shapes, MCP annotations, and error codes.
 
-| Tool                      | Kind                                                | Purpose                                                                                                                                                                         |
-| ------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bbgm_create_episode`     | mutating (not destructive)                          | Start an isolated, seeded episode; returns the initial overview state                                                                                                           |
-| `bbgm_get_state`          | read-only                                           | Read a bounded, paginated view of league state (`overview`, `roster`, `finances`, `standings`, `schedule`, `free_agents`, `draft`, `transactions`, `objectives`, `constraints`) |
-| `bbgm_get_options`        | read-only                                           | List legal action categories and candidate IDs for the current phase/revision                                                                                                   |
-| `bbgm_evaluate_trade`     | read-only (dry run)                                 | Check a proposed trade's legality, payroll/roster effects, and opponent acceptance without mutating                                                                             |
-| `bbgm_execute_trade`      | mutating                                            | Execute a previously evaluated, legal trade                                                                                                                                     |
-| `bbgm_set_lineup`         | mutating                                            | Set the roster's depth-chart order                                                                                                                                              |
-| `bbgm_release_player`     | mutating                                            | Waive a rostered player to free agency                                                                                                                                          |
-| `bbgm_negotiate_contract` | mutating                                            | Extend/renegotiate a rostered player's contract                                                                                                                                 |
-| `bbgm_sign_free_agent`    | mutating                                            | Sign an available free agent to a contract                                                                                                                                      |
-| `bbgm_make_draft_pick`    | mutating                                            | Select an available prospect with an owned pick (draft phase only)                                                                                                              |
-| `bbgm_advance`            | mutating                                            | Advance simulated time to a bounded target (`next_game`, `next_decision`, `days`, `games`, `phase`, `season_end`)                                                               |
-| `bbgm_checkpoint`         | read-only (`create`/`list`) or mutating (`restore`) | Create, list, or restore episode checkpoints                                                                                                                                    |
-| `bbgm_end_episode`        | mutating (terminal)                                 | Finalize an episode, compute terminal metrics, close its worker                                                                                                                 |
+| Tool                      | Kind                       | Purpose                                                                                                                                    |
+| ------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bbgm_create_episode`     | mutating (not destructive) | Start an isolated, seeded episode; returns the initial overview state                                                                      |
+| `bbgm_resume_episode`     | lifecycle                  | Rehydrate a persisted episode after a process restart                                                                                      |
+| `bbgm_get_state`          | read-only                  | Read a bounded, paginated view of league state (`draft` includes the complete current-owner pick ledger plus the user's owned-pick subset) |
+| `bbgm_get_options`        | read-only                  | List legal action categories and candidate IDs for the current phase/revision                                                              |
+| `bbgm_evaluate_trade`     | read-only (dry run)        | Check a proposed trade's legality, payroll/roster effects, and opponent acceptance without mutating                                        |
+| `bbgm_execute_trade`      | mutating                   | Execute a previously evaluated, legal trade                                                                                                |
+| `bbgm_set_lineup`         | mutating                   | Set the roster's depth-chart order                                                                                                         |
+| `bbgm_release_player`     | mutating                   | Waive a rostered player to free agency                                                                                                     |
+| `bbgm_negotiate_contract` | mutating                   | Extend/renegotiate a rostered player's contract                                                                                            |
+| `bbgm_sign_free_agent`    | mutating                   | Sign an available free agent to a contract                                                                                                 |
+| `bbgm_make_draft_pick`    | mutating                   | Select an available prospect with an owned pick (draft phase only)                                                                         |
+| `bbgm_advance`            | mutating                   | Advance simulated time to a bounded target, including named milestones such as the trade deadline, draft, and offseason decision windows   |
+| `bbgm_create_checkpoint`  | non-destructive lifecycle  | Persist an opaque checkpoint of the current episode state                                                                                  |
+| `bbgm_list_checkpoints`   | read-only                  | List opaque checkpoints created for the episode                                                                                            |
+| `bbgm_restore_checkpoint` | mutating                   | Restore a checkpoint while advancing the revision                                                                                          |
+| `bbgm_end_episode`        | mutating (terminal)        | Finalize an episode, compute terminal metrics, close its worker                                                                            |
 
 ## Minimal episode walkthrough
 
@@ -260,7 +288,7 @@ or tested transcript. Field values are plausible but fabricated; consult
 **8. Checkpoint before something risky**
 
 ```jsonc
-// call: bbgm_checkpoint { "action": "create", "episodeId": "e_9f2a..." }
+// call: bbgm_create_checkpoint { "episodeId": "e_9f2a..." }
 // -> { "checkpoint": { "checkpointId": "c_71bd...", "revision": 2, ... } }
 ```
 
@@ -312,8 +340,8 @@ Episode data is written under a data root that defaults to `.data/` in the
 project root (already gitignored). Per episode, this holds:
 
 ```
-.data/episodes/<episodeId>/trajectory.jsonl       # append-only log, one JSON record per create/mutation/end step
-.data/episodes/<episodeId>/checkpoints/<id>.json   # snapshots created by bbgm_checkpoint(action="create")
+.data/episodes/<episodeId>/trajectory.jsonl       # append-only log, including explicit rollback audit nodes
+.data/episodes/<episodeId>/checkpoints/<id>.json   # snapshots created by bbgm_create_checkpoint
 .data/episodes/<episodeId>/final-snapshot.json     # written by bbgm_end_episode when exportFinalSnapshot is true
 ```
 
@@ -322,7 +350,7 @@ data root — nothing under it is required for the wrapper itself to run,
 only for resuming or auditing past episodes:
 
 ```sh
-rm -rf .data
+rm -rf .data/episodes/<episode-id>
 ```
 
 ## Research reproducibility caveats

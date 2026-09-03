@@ -1,0 +1,123 @@
+{
+  "scenarioId": "long-horizon-asset-preservation-v1",
+  "description": "Development split for the two-season Basketball GM long-horizon asset-preservation benchmark; policy selection and debugging only.",
+  "split": {
+    "role": "development",
+    "parentScenarioId": "long-horizon-asset-preservation-v1"
+  },
+  "seedSet": ["grant-seed-001", "grant-seed-002", "grant-seed-003"],
+  "userTeamId": 0,
+  "startingSeason": 2026,
+  "horizonSeasons": 2,
+  "hardConstraints": [
+    {
+      "code": "ROSTER_SIZE",
+      "description": "Keep the controlled roster within the playable roster bounds"
+    },
+    {
+      "code": "NO_DUPLICATE_PLAYERS",
+      "description": "Never duplicate player ownership"
+    },
+    {
+      "code": "NO_DUPLICATE_PICKS",
+      "description": "Never duplicate draft-pick ownership"
+    },
+    {
+      "code": "VALID_CONTRACTS",
+      "description": "Keep roster contracts valid and unexpired"
+    },
+    {
+      "code": "FINITE_VALUES",
+      "description": "Keep all observed numeric state finite"
+    },
+    {
+      "code": "SEASON_PROGRESSION",
+      "description": "Never regress before the starting season"
+    },
+    { "code": "LINEUP_VALID", "description": "Keep roster ordering valid" }
+  ],
+  "softObjectives": [
+    {
+      "code": "MAXIMIZE_WINS",
+      "description": "Maximize regular-season wins",
+      "weight": 1
+    },
+    {
+      "code": "PRESERVE_DRAFT_CAPITAL",
+      "description": "Preserve future draft assets",
+      "weight": 1
+    },
+    {
+      "code": "MINIMIZE_ROSTER_CHURN",
+      "description": "Avoid unnecessary roster turnover",
+      "weight": 1
+    }
+  ],
+  "allowedInformation": [
+    "overview",
+    "roster",
+    "finances",
+    "standings",
+    "schedule",
+    "free_agents",
+    "draft",
+    "transactions",
+    "objectives",
+    "constraints",
+    "options"
+  ],
+  "allowedActions": [
+    "evaluate_trade",
+    "execute_trade",
+    "set_lineup",
+    "release_player",
+    "negotiate_contract",
+    "sign_free_agent",
+    "make_draft_pick",
+    "advance",
+    "create_checkpoint",
+    "list_checkpoints",
+    "restore_checkpoint"
+  ],
+  "allowedAdvanceTargets": [
+    "next_game",
+    "next_decision",
+    "days",
+    "games",
+    "week",
+    "month",
+    "one_pick",
+    "phase",
+    "season_end",
+    "until_all_star_game",
+    "until_regular_season",
+    "until_trade_deadline",
+    "until_playoffs",
+    "through_playoffs",
+    "until_draft",
+    "until_next_pick",
+    "until_resign_players",
+    "until_free_agency",
+    "until_preseason",
+    "until_end_of_round",
+    "until_end_of_play_in"
+  ],
+  "maxSteps": 300,
+  "reward": {
+    "mode": "lexicographic",
+    "order": [
+      "hard_constraints_satisfied_at_end",
+      "hard_constraint_violations",
+      "win_pct",
+      "total_asset_value",
+      "draft_capital_value",
+      "invalid_action_rate",
+      "stale_action_rate"
+    ],
+    "directions": {
+      "hard_constraint_violations": "min",
+      "invalid_action_rate": "min",
+      "stale_action_rate": "min"
+    }
+  }
+}

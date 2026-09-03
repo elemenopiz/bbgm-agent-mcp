@@ -10,6 +10,7 @@ import type {
   MakeDraftPickInput,
   NegotiateContractInput,
   Phase,
+  PlayerDetail,
   PlayerSummary,
   ProspectSummary,
   ReleasePlayerInput,
@@ -175,10 +176,14 @@ export class FakeSimulationEngine implements SimulationEngine {
         capSpace: salaryCap - payroll,
         luxuryTaxThreshold: salaryCap * 1.2,
         hardCapActive: false,
+        minContract: 1.2,
+        maxContract: 45,
       },
+      cumulativeRecord: { won: this.userWon, lost: this.userLost },
       roster: this.normalizeRosterOrder(structuredClone(this.roster)),
       freeAgents: structuredClone(this.freeAgents),
       draftProspects: structuredClone(this.draftProspects),
+      draftPicks: this.allDraftPicks(),
       ownedPicks: structuredClone(this.ownedPicks),
       standings,
       schedule: this.computeSchedule(),
@@ -195,6 +200,64 @@ export class FakeSimulationEngine implements SimulationEngine {
     const opponent = this.opponents.get(tid);
     if (!opponent) throw new Error(`Unknown team ${tid}`);
     return this.normalizeRosterOrder(structuredClone(opponent.players));
+  }
+
+  /**
+   * Fake-but-plausible player detail, synthesized from whichever tracked
+   * PlayerSummary (roster, free agents, or an opponent's roster) matches
+   * `pid` -- one ratings/stats history row derived from that player's
+   * current overall/potential/contract, since the fake engine does not
+   * track season-by-season history. An unmatched pid returns a mostly-empty
+   * PlayerDetail, mirroring the real engine's defensive-mapping contract
+   * (see src/engine/bbgm/adapter.ts's getPlayer()) instead of throwing.
+   */
+  async getPlayer(pid: number): Promise<PlayerDetail> {
+    const input = this.requireInput();
+    const player = [
+      ...this.roster,
+      ...this.freeAgents,
+      ...[...this.opponents.values()].flatMap((assets) => assets.players),
+    ].find((candidate) => candidate.pid === pid);
+    if (!player) {
+      return {
+        pid,
+        ratingsHistory: [],
+        statsHistory: [],
+        contractSchedule: [],
+        awards: [],
+        injuryHistory: [],
+      };
+    }
+    return {
+      pid: player.pid,
+      name: player.name,
+      age: player.age,
+      position: player.position,
+      teamId: input.userTeamId,
+      ratingsHistory: [
+        {
+          season: this.season,
+          age: player.age,
+          overall: player.overall,
+          potential: player.potential,
+        },
+      ],
+      statsHistory: [
+        {
+          season: this.season,
+          playoffs: false,
+          gamesPlayed: this.gamesPlayedThisSeason,
+          ...(player.per === undefined ? {} : { per: player.per }),
+        },
+      ],
+      contractAmount: player.contractAmount,
+      contractExpires: player.contractExpires,
+      contractSchedule: [
+        { season: this.season, amount: player.contractAmount, type: "current" },
+      ],
+      awards: [],
+      injuryHistory: [],
+    };
   }
 
   async getOptions(): Promise<({ type: string } & Record<string, unknown>)[]> {
@@ -402,9 +465,26 @@ export class FakeSimulationEngine implements SimulationEngine {
     input: NegotiateContractInput,
   ): Promise<EngineEvent[]> {
     const player = this.roster.find((p) => p.pid === input.pid);
-    if (!player) throw new Error(`Player ${input.pid} is not on the roster`);
-    player.contractAmount = input.amount;
-    player.contractExpires = this.season + input.years;
+    const resigningFreeAgent =
+      this.phase === "resigning"
+        ? this.freeAgents.findIndex((p) => p.pid === input.pid)
+        : -1;
+    if (player) {
+      player.contractAmount = input.amount;
+      player.contractExpires = this.season + input.years;
+    } else if (resigningFreeAgent !== -1) {
+      const [resigned] = this.freeAgents.splice(resigningFreeAgent, 1);
+      if (!resigned) throw new Error(`Player ${input.pid} not found`);
+      resigned.contractAmount = input.amount;
+      resigned.contractExpires = this.season + input.years;
+      resigned.rosterOrder = this.roster.length;
+      resigned.role = "bench";
+      this.roster.push(resigned);
+    } else {
+      throw new Error(
+        `Player ${input.pid} is not eligible for contract negotiation`,
+      );
+    }
     this.recordTransaction(
       "contract_extension",
       `Extended player ${input.pid}`,
@@ -549,6 +629,8 @@ export class FakeSimulationEngine implements SimulationEngine {
         }
         return stop("hit_step_limit");
       }
+      default:
+        throw new Error(`Unsupported fake advance target: ${input.target}`);
     }
   }
 
@@ -698,6 +780,15 @@ export class FakeSimulationEngine implements SimulationEngine {
       description,
       teamIds,
     });
+  }
+
+  private allDraftPicks(): DraftPickSummary[] {
+    return [
+      ...structuredClone(this.ownedPicks),
+      ...[...this.opponents.values()].flatMap((assets) =>
+        structuredClone(assets.picks),
+      ),
+    ];
   }
 
   private isBlocked(): boolean {

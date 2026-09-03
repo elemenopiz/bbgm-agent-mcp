@@ -7,6 +7,7 @@ import type {
   EngineRawState,
   MakeDraftPickInput,
   NegotiateContractInput,
+  PlayerDetail,
   PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
@@ -39,6 +40,14 @@ export type SimulationEngine = {
    * visibility: rosters are public, unlike hidden opponent valuations.
    */
   getTeamRoster(tid: number): Promise<PlayerSummary[]>;
+
+  /**
+   * Deep detail for a single player -- ratings history, stats history,
+   * contract schedule, awards, draft info, and injury history. Must not
+   * mutate state. Never throws on an unknown or missing pid; returns a
+   * partial/empty PlayerDetail instead (see adapter.ts's getPlayer()).
+   */
+  getPlayer(pid: number): Promise<PlayerDetail>;
 
   /** Must not mutate state. */
   evaluateTrade(proposal: TradeProposal): Promise<TradeEvaluation>;

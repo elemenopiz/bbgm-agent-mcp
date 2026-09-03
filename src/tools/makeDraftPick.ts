@@ -41,6 +41,7 @@ export const registerMakeDraftPick = (
             { pid },
             { expectedRevision, idempotencyKey },
           ),
+          mutationResultSchema,
         );
       } catch (error) {
         return failure(error);

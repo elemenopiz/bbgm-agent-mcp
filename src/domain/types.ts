@@ -1,6 +1,132 @@
 export const STATE_SCHEMA_VERSION = "1" as const;
 
-export type EpisodeStatus = "active" | "ended";
+export type EpisodeStatus = "active" | "ended" | "quarantined";
+
+export const DEFAULT_ALLOWED_INFORMATION = [
+  "overview",
+  "roster",
+  "finances",
+  "standings",
+  "schedule",
+  "free_agents",
+  "draft",
+  "transactions",
+  "objectives",
+  "constraints",
+  "options",
+  "player_detail",
+] as const;
+
+export const DEFAULT_ALLOWED_ACTIONS = [
+  "evaluate_trade",
+  "execute_trade",
+  "set_lineup",
+  "release_player",
+  "negotiate_contract",
+  "sign_free_agent",
+  "make_draft_pick",
+  "advance",
+  "create_checkpoint",
+  "list_checkpoints",
+  "restore_checkpoint",
+] as const;
+
+export const ADVANCE_TARGETS = [
+  "next_game",
+  "next_decision",
+  "days",
+  "games",
+  "week",
+  "month",
+  "one_pick",
+  "phase",
+  "season_end",
+  "until_all_star_game",
+  "until_trade_deadline",
+  "until_playoffs",
+  "until_end_of_round",
+  "until_end_of_play_in",
+  "through_playoffs",
+  "until_draft",
+  "until_next_pick",
+  "until_resign_players",
+  "until_free_agency",
+  "until_preseason",
+  "until_regular_season",
+] as const;
+export type AdvanceTarget = (typeof ADVANCE_TARGETS)[number];
+
+/**
+ * Full typed advance surface exposed by the wrapper. Scenario manifests may
+ * narrow this for a specific study, but the default remains close to the
+ * upstream play menu so the environment does not encode a strategy for the
+ * evaluated policy.
+ */
+export const DEFAULT_ALLOWED_ADVANCE_TARGETS: AdvanceTarget[] = [
+  "next_game",
+  "next_decision",
+  "days",
+  "games",
+  "week",
+  "month",
+  "one_pick",
+  "phase",
+  "season_end",
+  "until_all_star_game",
+  "until_trade_deadline",
+  "until_playoffs",
+  "until_end_of_round",
+  "until_end_of_play_in",
+  "through_playoffs",
+  "until_draft",
+  "until_next_pick",
+  "until_resign_players",
+  "until_free_agency",
+  "until_preseason",
+  "until_regular_season",
+];
+
+/**
+ * Public-MCP preset. This intentionally preserves the full human-facing
+ * pacing surface, including day/week/month and explicit counts. Safety comes
+ * from bounded counts, episode budgets, typed mutations, revision checks,
+ * timeouts, and rollback—not from curating the policy's strategic choices.
+ * The wrapper still omits upstream's automatic `untilEnd` draft completion,
+ * because it would silently make a mandatory user decision on the agent's
+ * behalf.
+ */
+export const PUBLIC_MCP_ALLOWED_ADVANCE_TARGETS: AdvanceTarget[] = [
+  "next_game",
+  "next_decision",
+  "days",
+  "games",
+  "week",
+  "month",
+  "one_pick",
+  "phase",
+  "season_end",
+  "until_all_star_game",
+  "until_trade_deadline",
+  "until_playoffs",
+  "until_end_of_round",
+  "until_end_of_play_in",
+  "through_playoffs",
+  "until_draft",
+  "until_next_pick",
+  "until_resign_players",
+  "until_free_agency",
+  "until_preseason",
+  "until_regular_season",
+];
+
+export type ScenarioPolicy = {
+  allowedInformation: string[];
+  allowedActions: string[];
+  /** Optional finer-grained allowlist for the advance tool. */
+  allowedAdvanceTargets?: AdvanceTarget[] | undefined;
+  maxSteps?: number | undefined;
+  horizonSeasons?: number | undefined;
+};
 
 export const PHASES = [
   "preseason",
@@ -12,6 +138,11 @@ export const PHASES = [
   "free_agency",
 ] as const;
 export type Phase = (typeof PHASES)[number];
+
+/** Employment is an engine fact, not an evaluator prediction. Engines that
+ * cannot expose the upstream firing state must leave this undefined rather
+ * than making a claim about whether the GM is still employed. */
+export type EmploymentStatus = "employed" | "fired" | "unknown";
 
 export type EngineMetadata = {
   name: string;
@@ -37,6 +168,153 @@ export type PlayerSummary = {
   injuryGamesRemaining: number;
   role: PlayerRole;
   rosterOrder: number;
+  /** Enrichment sourced from zengm's own roster view rather than raw rows.
+   * Optional because it is only populated for views backed by that call
+   * (see docs/INFORMATION_AUDIT.md). */
+  /** Year-over-year change in overall / potential -- the development curve. */
+  overallChange?: number;
+  potentialChange?: number;
+  /** zengm skill tags, e.g. "3" (shooter), "B" (ball handler), "Dp". */
+  skills?: string[];
+  untradable?: boolean;
+  /** Mood: whether the player would negotiate now, and the amount they would
+   * actually accept -- previously invisible, forcing brute-force signing. */
+  willingToNegotiate?: boolean;
+  probWilling?: number;
+  askingAmount?: number;
+  yearsWithTeam?: number;
+  gamesPlayed?: number;
+  minutesPerGame?: number;
+  pointsPerGame?: number;
+  reboundsPerGame?: number;
+  assistsPerGame?: number;
+  per?: number;
+};
+
+// ---------------------------------------------------------------------------
+// Player detail (bbgm_get_player) -- the "click into a player" view. Sourced
+// from zengm's own player worker view (src/worker/views/player.ts), which
+// returns full ratings/stats history in one call; see adapter.ts's
+// getPlayer() for the mapping. Deliberately excludes zengm's internal
+// `value` composite valuation -- the same function the trade AI uses to
+// judge offers, so exposing it would leak the counterparty's utility
+// function to the policy.
+// ---------------------------------------------------------------------------
+
+/** One season's individual ratings. Field names mirror zengm's own
+ * abbreviations (see docs/INFORMATION_AUDIT.md) except `str`, which maps
+ * from zengm's `stre`. Every rating is optional -- older/partial data may be
+ * missing individual fields. */
+export type PlayerRatingsSeason = {
+  season: number;
+  teamId?: number;
+  age?: number;
+  overall?: number;
+  potential?: number;
+  hgt?: number;
+  str?: number;
+  spd?: number;
+  jmp?: number;
+  endu?: number;
+  ins?: number;
+  dnk?: number;
+  ft?: number;
+  fg?: number;
+  tp?: number;
+  oiq?: number;
+  diq?: number;
+  drb?: number;
+  pss?: number;
+  reb?: number;
+  skills?: string[];
+};
+
+/** One season's (or one playoffs run's) basic + advanced production, keyed
+ * by the `playoffs` flag so a single season can appear twice (regular +
+ * playoffs) and mid-season trades can appear per-team plus a merged total. */
+export type PlayerStatsSeason = {
+  season: number;
+  teamId?: number;
+  playoffs: boolean;
+  gamesPlayed?: number;
+  minutesPerGame?: number;
+  pointsPerGame?: number;
+  reboundsPerGame?: number;
+  assistsPerGame?: number;
+  stealsPerGame?: number;
+  blocksPerGame?: number;
+  turnoversPerGame?: number;
+  fieldGoalPct?: number;
+  threePointPct?: number;
+  freeThrowPct?: number;
+  /** Player Efficiency Rating. */
+  per?: number;
+  offensiveWinShares?: number;
+  defensiveWinShares?: number;
+  winShares?: number;
+  winSharesPer48?: number;
+  offensiveBPM?: number;
+  defensiveBPM?: number;
+  bpm?: number;
+  vorp?: number;
+  trueShootingPct?: number;
+  usagePct?: number;
+};
+
+export type PlayerContractYear = {
+  season: number;
+  /** Millions of dollars. */
+  amount: number;
+  type: "past" | "current" | "future";
+};
+
+export type PlayerAward = {
+  season: number;
+  type: string;
+};
+
+/** A past injury. `games` is games missed, not games remaining -- see
+ * `currentInjury` on PlayerDetail for the player's present availability. */
+export type PlayerInjuryHistoryEntry = {
+  season?: number;
+  type: string;
+  games?: number;
+};
+
+export type PlayerDraftInfo = {
+  year?: number;
+  round?: number;
+  pick?: number;
+  originalTeamId?: number;
+};
+
+export type PlayerDetail = {
+  pid: number;
+  name?: string;
+  age?: number;
+  position?: string;
+  teamId?: number;
+  ratingsHistory: PlayerRatingsSeason[];
+  statsHistory: PlayerStatsSeason[];
+  /** Millions of dollars. */
+  contractAmount?: number;
+  contractExpires?: number;
+  contractSchedule: PlayerContractYear[];
+  awards: PlayerAward[];
+  draft?: PlayerDraftInfo;
+  currentInjury?: { type: string; gamesRemaining: number };
+  injuryHistory: PlayerInjuryHistoryEntry[];
+};
+
+export type GetPlayerInput = {
+  episodeId: string;
+  pid: number;
+};
+
+export type GetPlayerResult = {
+  episodeId: string;
+  revision: number;
+  player: PlayerDetail;
 };
 
 export type ProspectSummary = {
@@ -52,7 +330,8 @@ export type ProspectSummary = {
 export type DraftPickSummary = {
   dpid: number;
   season: number;
-  round: 1 | 2;
+  /** Draft round as stored by BBGM; custom leagues may have more than two. */
+  round: number;
   originalTeamId: number;
   currentTeamId: number;
   protection?: string;
@@ -76,6 +355,11 @@ export type TeamSummary = {
   capSpace: number;
   luxuryTaxThreshold: number;
   hardCapActive: boolean;
+  /** Minimum contract. Over the cap, only minimum-salary signings are legal
+   * (zengm contractNegotiation/accept.ts). Without this the policy cannot
+   * know a legal signing exists. */
+  minContract: number;
+  maxContract: number;
 };
 
 export type TeamStanding = {
@@ -152,13 +436,22 @@ export type ScenarioConstraintSpec = {
 // ---------------------------------------------------------------------------
 
 export type EngineRawState = {
+  /** Roster bounds as configured in the league (zengm minRosterSize /
+   * maxRosterSize). Optional: falls back to the basketball defaults. */
+  rosterMin?: number;
+  rosterMax?: number;
   season: number;
   phase: Phase;
   day?: number;
+  employmentStatus?: EmploymentStatus;
   userTeam: TeamSummary;
+  /** Episode-wide record used by research metrics; userTeam is current-season state. */
+  cumulativeRecord?: { won: number; lost: number };
   roster: PlayerSummary[];
   freeAgents: PlayerSummary[];
   draftProspects: ProspectSummary[];
+  /** Complete current-owner ledger, including picks held by other teams. */
+  draftPicks: DraftPickSummary[];
   ownedPicks: DraftPickSummary[];
   standings: TeamStanding[];
   schedule: ScheduledGame[];
@@ -181,6 +474,9 @@ export type CreateEpisodeInput = {
   userTeamId: number;
   startingSeason: number;
   constraints: ScenarioConstraintSpec;
+  scenarioPolicy?: ScenarioPolicy;
+  /** Internal/evaluator-only starting snapshot; never exposed by the MCP create tool. */
+  initialSnapshot?: unknown;
 };
 
 export type EpisodeMetadata = {
@@ -247,6 +543,7 @@ export type OverviewView = ViewEnvelope & {
   view: "overview";
   status: EpisodeStatus;
   day?: number;
+  employmentStatus?: EmploymentStatus;
   userTeam: TeamSummary;
   rosterCount: number;
   rosterExcerpt: PlayerSummary[];
@@ -271,6 +568,8 @@ export type FinancesView = ViewEnvelope & {
   capSpace: number;
   luxuryTaxThreshold: number;
   hardCapActive: boolean;
+  minContract: number;
+  maxContract: number;
 };
 
 export type StandingsView = ViewEnvelope & {
@@ -295,6 +594,8 @@ export type DraftView = ViewEnvelope & {
   view: "draft";
   prospects: ProspectSummary[];
   prospectPage: PageMeta;
+  /** All standard-league draft assets, sorted by season, round, and ID. */
+  draftPicks: DraftPickSummary[];
   ownedPicks: DraftPickSummary[];
 };
 
@@ -357,6 +658,11 @@ export type MutationResult = {
   stateSummary: OverviewView;
 };
 
+export type IdempotencyRecord = {
+  fingerprint: string;
+  result: MutationResult;
+};
+
 export type TradeAsset =
   { type: "player"; pid: number } | { type: "draft_pick"; dpid: number };
 
@@ -374,9 +680,6 @@ export type TradeEvaluation = {
   rosterSizeDelta: number;
   assetsExchanged: { offered: TradeAsset[]; requested: TradeAsset[] };
 };
-
-export type AdvanceTarget =
-  "next_game" | "next_decision" | "days" | "games" | "phase" | "season_end";
 
 export type AdvanceInput = {
   target: AdvanceTarget;
@@ -422,6 +725,7 @@ export type EndEpisodeInput = {
 export type TerminalMetrics = {
   episodeId: string;
   seasonsCompleted: number;
+  /** Record across all seasons represented by the episode, not just the current season. */
   finalRecord: { won: number; lost: number };
   hardConstraintViolations: number;
   transactionCount: number;

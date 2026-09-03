@@ -21,6 +21,18 @@ export const toolAnnotations = {
     idempotentHint: false,
     openWorldHint: false,
   },
+  createCheckpoint: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  resumeEpisode: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
   mutate: {
     readOnlyHint: false,
     destructiveHint: true,

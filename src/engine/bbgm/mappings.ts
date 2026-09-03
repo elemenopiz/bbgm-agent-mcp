@@ -234,13 +234,9 @@ export type RawDraftPickRow = {
 };
 
 /**
- * DraftPickSummary.round is typed `1 | 2` in the domain model (matching the
- * standard, un-customized 2-round league that CreateEpisodeInput always
- * produces). zengm's DraftPick.round is a plain `number` (a custom league
- * could have more rounds). Any round beyond 1 is clamped to 2 here -- exact
- * for the default configuration this adapter creates, but would
- * misrepresent a save file customized to more than 2 rounds. See
- * compatibility.ts.
+ * zengm's DraftPick.round is a plain number (a custom league could have more
+ * rounds), so preserve it rather than silently collapsing round 3+ into
+ * round 2. The standard league still produces the familiar 1/2 values.
  *
  * `protection` is sourced from zengm's free-text `note` field on the pick,
  * which is not a structured protection type upstream -- best-effort only.
@@ -253,7 +249,7 @@ export function mapDraftPickToSummary(
   return {
     dpid: raw.dpid,
     season,
-    round: raw.round <= 1 ? 1 : 2,
+    round: Math.max(1, raw.round),
     originalTeamId: raw.originalTid,
     currentTeamId: raw.tid,
     ...(raw.note ? { protection: raw.note } : {}),
@@ -286,6 +282,8 @@ export function mapTeamSummary(params: {
   salaryCap: number;
   luxuryTaxThreshold: number;
   hardCapActive: boolean;
+  minContract: number;
+  maxContract: number;
   standingRank: number;
   conferenceName: string;
   divisionName: string;
@@ -297,6 +295,8 @@ export function mapTeamSummary(params: {
     salaryCap,
     luxuryTaxThreshold,
     hardCapActive,
+    minContract,
+    maxContract,
     standingRank,
     conferenceName,
     divisionName,
@@ -315,6 +315,8 @@ export function mapTeamSummary(params: {
     capSpace: (salaryCap - payroll) / 1000,
     luxuryTaxThreshold: luxuryTaxThreshold / 1000,
     hardCapActive,
+    minContract: minContract / 1000,
+    maxContract: maxContract / 1000,
   };
 }
 

@@ -41,6 +41,7 @@ export const registerSetLineup = (
             { order },
             { expectedRevision, idempotencyKey },
           ),
+          mutationResultSchema,
         );
       } catch (error) {
         return failure(error);

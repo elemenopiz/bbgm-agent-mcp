@@ -32,6 +32,10 @@ const scenario: ScenarioManifest = {
     "release_player",
   ],
   maxSteps: 60,
+  reward: {
+    mode: "scalar",
+    weights: { win_pct: 1, hard_constraint_violations: -1 },
+  },
 };
 
 describe("research evaluation harness", () => {
@@ -62,6 +66,10 @@ describe("research evaluation harness", () => {
       expect(result.terminalMetrics.episodeId).toBe(result.episodeId);
       expect(result.metricComponents["win_pct"]).toBeGreaterThanOrEqual(0);
       expect(result.trajectorySummary.totalSteps).toBeGreaterThan(0);
+      expect(result.reward.mode).toBe("scalar");
+      if (result.reward.mode === "scalar") {
+        expect(Number.isFinite(result.reward.value)).toBe(true);
+      }
 
       const reward = scalarReward(result.metricComponents, {
         win_pct: 1,
@@ -95,6 +103,42 @@ describe("research evaluation harness", () => {
       await domain.closeAll();
 
       expect(result.stallReason).toMatch(/mandatory draft pick/);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test("does not pass evaluator-only overview state to a policy when overview is disallowed", async () => {
+    const dataRoot = await mkdtemp(
+      join(tmpdir(), "bbgm-research-policy-boundary-"),
+    );
+    try {
+      const episodes = new EpisodeManager(
+        () => new FakeSimulationEngine(),
+        dataRoot,
+      );
+      const domain = new DomainService(
+        episodes,
+        createFileSnapshotStore(dataRoot),
+      );
+
+      const result = await runEvaluation({
+        scenario: {
+          ...scenario,
+          seedSet: [...scenario.seedSet, "research-policy-boundary-seed"],
+          allowedInformation: ["roster"],
+          allowedActions: ["advance"],
+          maxSteps: 1,
+        },
+        seed: "research-policy-boundary-seed",
+        policyName: "heuristic",
+        domain,
+        dataRoot,
+      });
+      await domain.closeAll();
+
+      expect(result.completionStatus).toBe("stalled");
+      expect(result.stallReason).toContain("overview information channel");
     } finally {
       await rm(dataRoot, { recursive: true, force: true });
     }

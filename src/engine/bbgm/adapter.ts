@@ -2,10 +2,18 @@ import type {
   AdvanceInput,
   CreateEpisodeInput,
   EngineEvent,
+  EmploymentStatus,
   EngineOption,
   EngineRawState,
   MakeDraftPickInput,
   NegotiateContractInput,
+  PlayerAward,
+  PlayerContractYear,
+  PlayerDetail,
+  PlayerDraftInfo,
+  PlayerInjuryHistoryEntry,
+  PlayerRatingsSeason,
+  PlayerStatsSeason,
   PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
@@ -53,6 +61,26 @@ import {
 
 export type ZengmConditions = Record<string, unknown>;
 
+/**
+ * The upstream negotiation preflight can reject a free-agent offer before it
+ * mutates IndexedDB (for example, when the player is unwilling). Marking that
+ * fact lets DomainService preserve the audit record without repeatedly
+ * importing a full league snapshot, which otherwise grows the in-memory
+ * IndexedDB heap during long baseline runs.
+ */
+class EngineActionRejectedError extends Error {
+  readonly code = "ILLEGAL_ACTION";
+  readonly retryable = false;
+  readonly rollbackRequired = false;
+  readonly details: Record<string, unknown>;
+
+  constructor(message: string, details: Record<string, unknown>) {
+    super(message);
+    this.name = "EngineActionRejectedError";
+    this.details = details;
+  }
+}
+
 export type ZengmTradeTeam = { tid: number; pids: number[]; dpids: number[] };
 export type ZengmTradeTeams = [ZengmTradeTeam, ZengmTradeTeam];
 
@@ -67,7 +95,24 @@ type StoreApi<T> = {
   clear: () => Promise<void>;
 };
 
+type ZengmNegotiation = { pid: number; tid: number; resigning: boolean };
+
 export type ZengmModules = {
+  /** zengm's own curated worker views (src/worker/views). Preferred source
+   * for player information: raw IndexedDB rows carry no mood, ratings deltas,
+   * skills or stats. See docs/INFORMATION_AUDIT.md. */
+  views?: {
+    roster: (inputs: {
+      tid: number;
+      season: number;
+      playoffs: "regularSeason" | "playoffs" | "combined";
+    }) => Promise<unknown>;
+    /** zengm's player-detail worker view (src/worker/views/player.ts).
+     * Returns the full ratings/stats/contract/award/injury history for one
+     * player -- this is what bbgm_get_player maps from. See getPlayer()
+     * below. */
+    player?: (inputs: { pid: number }) => Promise<unknown>;
+  };
   core: {
     player: {
       setContract: (
@@ -133,6 +178,7 @@ export type ZengmModules = {
         draftPicks: StoreApi<RawDraftPickRow>;
         schedule: StoreApi<RawScheduleRow>;
         events: StoreApi<RawEventRow>;
+        negotiations: StoreApi<ZengmNegotiation>;
         trade: StoreApi<{ rid: number; teams: ZengmTradeTeams }>;
         flush: () => Promise<void>;
       };
@@ -142,7 +188,13 @@ export type ZengmModules = {
             transaction: (storeNames: string[]) => IdbTransactionLike;
           }
         | undefined;
-      meta: { close: () => Promise<void> };
+      meta: {
+        put: (
+          storeName: "leagues",
+          value: ZengmLeagueMetadata,
+        ) => Promise<unknown>;
+        close: () => Promise<void>;
+      };
     };
     connectLeague: (lid: number) => Promise<{
       transaction: (
@@ -154,6 +206,7 @@ export type ZengmModules = {
   };
   util: {
     g: { get: (key: string) => unknown };
+    lock: { get: (name: "gameSim" | "newPhase") => boolean };
     helpers: {
       addPopRank: (teams: unknown[]) => unknown[];
       getTeamsDefault: () => unknown[];
@@ -184,7 +237,7 @@ export type ZengmModules = {
         pid: number;
         amount: number;
         exp: number;
-      }) => Promise<string | undefined>;
+      }) => Promise<string | number | undefined>;
       createTrade: (teams: ZengmTradeTeams) => Promise<void>;
       proposeTrade: (
         forceTrade: boolean,
@@ -221,10 +274,134 @@ type IdbTransactionLike = {
   done: Promise<void>;
 };
 
+type SnapshotRow = Record<string, unknown>;
+
+type LeagueSnapshot = {
+  lid: number;
+  data: Record<string, unknown[]>;
+};
+
+type ZengmLeagueMetadata = {
+  lid: number;
+  name: string;
+  tid: number;
+  phaseText: string;
+  teamName: string;
+  teamRegion: string;
+  difficulty?: number;
+  created: Date;
+  lastPlayed: Date;
+  startingSeason?: number;
+  season?: number;
+  imgURL?: string;
+};
+
+const isRecord = (value: unknown): value is SnapshotRow =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isUnknownArray = (value: unknown): value is unknown[] =>
+  Array.isArray(value);
+
+const parseLeagueSnapshot = (snapshot: unknown): LeagueSnapshot => {
+  if (!isRecord(snapshot) || !Number.isSafeInteger(snapshot["lid"])) {
+    throw new Error("Basketball GM snapshot is missing a valid league id");
+  }
+  if (!isRecord(snapshot["data"])) {
+    throw new Error("Basketball GM snapshot is missing league data");
+  }
+
+  const data: Record<string, unknown[]> = {};
+  for (const [storeName, rows] of Object.entries(snapshot["data"])) {
+    if (!Array.isArray(rows)) {
+      throw new Error(
+        `Basketball GM snapshot store ${storeName} must contain an array`,
+      );
+    }
+    data[storeName] = rows;
+  }
+  return { lid: snapshot["lid"] as number, data };
+};
+
+const snapshotAttribute = (
+  data: Record<string, unknown[]>,
+  key: string,
+): unknown => {
+  const row = data["gameAttributes"]?.find(
+    (candidate) => isRecord(candidate) && candidate["key"] === key,
+  );
+  if (!isRecord(row)) return undefined;
+
+  const value = row["value"];
+  if (
+    isUnknownArray(value) &&
+    value.length > 0 &&
+    isRecord(value[0]) &&
+    "start" in value[0] &&
+    "value" in value[0]
+  ) {
+    const last = value.at(-1);
+    return isRecord(last) ? last["value"] : undefined;
+  }
+  return value;
+};
+
+const finiteNumber = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const leagueMetadataFromSnapshot = (
+  snapshot: LeagueSnapshot,
+): ZengmLeagueMetadata => {
+  const tid = finiteNumber(snapshotAttribute(snapshot.data, "userTid"));
+  if (tid === undefined || !Number.isSafeInteger(tid)) {
+    throw new Error(
+      "Basketball GM snapshot is missing a numeric userTid game attribute",
+    );
+  }
+
+  const teams = snapshot.data["teams"] ?? [];
+  const team = teams.find(
+    (candidate) => isRecord(candidate) && candidate["tid"] === tid,
+  );
+  const teamName =
+    isRecord(team) && typeof team["name"] === "string"
+      ? team["name"]
+      : `Team ${tid}`;
+  const teamRegion =
+    isRecord(team) && typeof team["region"] === "string" ? team["region"] : "";
+
+  const metadata: ZengmLeagueMetadata = {
+    lid: snapshot.lid,
+    name: `MCP restored league ${snapshot.lid}`,
+    tid,
+    phaseText: "",
+    teamName,
+    teamRegion,
+    created: new Date(),
+    lastPlayed: new Date(),
+  };
+  const difficulty = finiteNumber(
+    snapshotAttribute(snapshot.data, "difficulty"),
+  );
+  const season = finiteNumber(snapshotAttribute(snapshot.data, "season"));
+  const startingSeason = finiteNumber(
+    snapshotAttribute(snapshot.data, "startingSeason"),
+  );
+  const imgURL =
+    isRecord(team) && typeof team["imgURL"] === "string"
+      ? team["imgURL"]
+      : undefined;
+  if (difficulty !== undefined) metadata.difficulty = difficulty;
+  if (season !== undefined) metadata.season = season;
+  if (startingSeason !== undefined) metadata.startingSeason = startingSeason;
+  if (imgURL !== undefined) metadata.imgURL = imgURL;
+  return metadata;
+};
+
 export type BasketballGmAdapter = {
   create(input: CreateEpisodeInput): Promise<void>;
   getRawState(): Promise<EngineRawState>;
   getTeamRoster(params: { tid: number }): Promise<PlayerSummary[]>;
+  getPlayer(params: { pid: number }): Promise<PlayerDetail>;
   getOptions(): Promise<EngineOption[]>;
   evaluateTrade(proposal: TradeProposal): Promise<TradeEvaluation>;
   executeTrade(proposal: TradeProposal): Promise<EngineEvent[]>;
@@ -258,6 +435,42 @@ const PHASE_STEP_ACTION: Record<number, string> = {
   [ZENGM_PHASE.FREE_AGENCY]: "day",
 };
 
+/**
+ * Direct mappings for the meaningful time controls exposed by Basketball GM's
+ * play menu. The existing phase-step loop remains the default for
+ * next_decision/phase/season_end because it can stop at the wrapper's explicit
+ * decision boundaries. These controls mirror upstream's bounded UI actions;
+ * they never choose a player or silently complete a user's draft pick.
+ */
+const PLAY_MENU_TARGET_ACTION: Partial<Record<AdvanceInput["target"], string>> =
+  {
+    week: "week",
+    month: "month",
+    one_pick: "onePick",
+    until_all_star_game: "untilAllStarGame",
+    until_trade_deadline: "untilTradeDeadline",
+    until_playoffs: "untilPlayoffs",
+    until_end_of_round: "untilEndOfRound",
+    until_end_of_play_in: "untilEndOfPlayIn",
+    through_playoffs: "throughPlayoffs",
+    until_draft: "untilDraft",
+    until_next_pick: "untilYourNextPick",
+    until_resign_players: "untilResignPlayers",
+    until_free_agency: "untilFreeAgency",
+    until_preseason: "untilPreseason",
+    until_regular_season: "untilRegularSeason",
+  };
+
+const MILESTONE_MINIMUM_PHASE: Partial<Record<AdvanceInput["target"], number>> =
+  {
+    until_preseason: ZENGM_PHASE.PRESEASON,
+    until_playoffs: ZENGM_PHASE.PLAYOFFS,
+    until_draft: ZENGM_PHASE.DRAFT,
+    until_resign_players: ZENGM_PHASE.RESIGN_PLAYERS,
+    until_free_agency: ZENGM_PHASE.FREE_AGENCY,
+    until_regular_season: ZENGM_PHASE.REGULAR_SEASON,
+  };
+
 export function createBasketballGmAdapter(
   zengm: ZengmModules,
 ): BasketballGmAdapter {
@@ -277,6 +490,51 @@ export function createBasketballGmAdapter(
   const userTid = (): number => g.get("userTid") as number;
   const season = (): number => g.get("season") as number;
   const phaseNum = (): number => g.get("phase") as number;
+
+  /**
+   * BBGM's gameOver attribute is the authoritative employment boundary for
+   * this study. It is not present in every engine state (notably immediately
+   * after league creation), so unsupported/absent values remain undefined and
+   * are surfaced as an unknown status by higher layers.
+   */
+  const employmentStatus = (): EmploymentStatus | undefined => {
+    try {
+      const gameOver = g.get("gameOver");
+      if (gameOver === true || gameOver === "fired") return "fired";
+      if (gameOver === false || gameOver === "employed") return "employed";
+    } catch {
+      // g.get throws when the optional attribute has not been initialized.
+    }
+    return undefined;
+  };
+
+  const currentDay = (): number | undefined => {
+    try {
+      return g.get("day") as number;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const cumulativeUserRecord = async (
+    tid: number,
+  ): Promise<{ won: number; lost: number } | undefined> => {
+    await idb.cache.flush();
+    const league = idb.league;
+    if (!league) return undefined;
+    const transaction = league.transaction(["teamSeasons"]);
+    const rows = await transaction.objectStore("teamSeasons").getAll();
+    await transaction.done;
+
+    let won = 0;
+    let lost = 0;
+    for (const row of rows) {
+      if (!isRecord(row) || row["tid"] !== tid) continue;
+      if (typeof row["won"] === "number") won += row["won"];
+      if (typeof row["lost"] === "number") lost += row["lost"];
+    }
+    return { won, lost };
+  };
 
   // -- shared read helpers ---------------------------------------------------
 
@@ -306,6 +564,142 @@ export function createBasketballGmAdapter(
     const order = await core.draft.getOrder();
     const next = order[0];
     return next?.tid === userTid();
+  };
+
+  const hasPendingResigningNegotiations = async (): Promise<boolean> => {
+    if (phaseNum() !== ZENGM_PHASE.RESIGN_PLAYERS) return false;
+    await idb.cache.flush();
+    const negotiations = await idb.cache.negotiations.getAll();
+    for (const negotiation of negotiations) {
+      if (negotiation.tid !== userTid() || !negotiation.resigning) continue;
+      // The upstream phase transition can retain a stale resigning row after
+      // the player has already become a free agent. Such a row is not a
+      // decision the user can legally resolve, so it must not deadlock the
+      // milestone controller.
+      const player = await idb.cache.players.get(negotiation.pid);
+      if (player?.tid === userTid()) return true;
+    }
+    return false;
+  };
+
+  const isBlockedOnUserDecision = async (): Promise<boolean> =>
+    (await isBlockedOnUserDraftPick()) ||
+    (await hasPendingResigningNegotiations());
+
+  const waitForUpstreamSimulation = async (): Promise<void> => {
+    const deadline = Date.now() + 60_000;
+    let idlePolls = 0;
+    while (util.lock.get("gameSim")) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          "Basketball GM milestone simulation did not become idle within 60 seconds",
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    // BBGM clears gameSim immediately before cbNoGames starts a final phase
+    // transition. Require two consecutive idle turns so we do not read the
+    // league between those operations.
+    while (idlePolls < 2 || util.lock.get("newPhase")) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          "Basketball GM milestone phase transition did not become idle within 60 seconds",
+        );
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!util.lock.get("gameSim") && !util.lock.get("newPhase")) {
+        idlePolls += 1;
+      } else {
+        idlePolls = 0;
+      }
+    }
+    await idb.cache.flush();
+  };
+
+  const milestoneReached = async (
+    target: AdvanceInput["target"],
+    seasonBefore: number,
+  ): Promise<boolean> => {
+    const phase = phaseNum();
+    switch (target) {
+      case "until_all_star_game":
+        // The public state model does not expose the special-game day. The
+        // upstream play-menu call is authoritative when it advances the day;
+        // a phase transition past the regular season is also unambiguous.
+        return phase > ZENGM_PHASE.REGULAR_SEASON;
+      case "until_trade_deadline":
+        return phase >= ZENGM_PHASE.AFTER_TRADE_DEADLINE;
+      case "until_playoffs":
+        return phase >= ZENGM_PHASE.PLAYOFFS;
+      case "until_end_of_round":
+      case "until_end_of_play_in":
+        return phase > ZENGM_PHASE.PLAYOFFS;
+      case "through_playoffs":
+        return phase > ZENGM_PHASE.PLAYOFFS || season() > seasonBefore;
+      case "until_draft":
+        return phase >= ZENGM_PHASE.DRAFT;
+      case "until_next_pick":
+        return await isBlockedOnUserDraftPick();
+      case "until_resign_players":
+        return phase >= ZENGM_PHASE.RESIGN_PLAYERS;
+      case "until_free_agency":
+        return phase >= ZENGM_PHASE.FREE_AGENCY;
+      case "until_preseason":
+        return phase >= ZENGM_PHASE.PRESEASON;
+      case "until_regular_season":
+        return phase >= ZENGM_PHASE.REGULAR_SEASON;
+      case "week":
+      case "month":
+      case "one_pick":
+        // These are direct upstream play-menu operations. A no-op is still
+        // a valid human-facing action in a phase where the upstream menu does
+        // not advance (for example, while waiting for a draft pick).
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const advanceByPhaseStepsUntilMilestone = async (
+    target: AdvanceInput["target"],
+    seasonBefore: number,
+  ): Promise<EngineEvent[]> => {
+    for (let step = 0; step < MAX_ADVANCE_STEPS; step += 1) {
+      if (await milestoneReached(target, seasonBefore)) {
+        return [
+          {
+            type: "advance_complete",
+            reason: `completed_${target}_fallback`,
+          },
+        ];
+      }
+      if (await isBlockedOnUserDecision()) {
+        return [
+          { type: "advance_complete", reason: "blocked_pending_decision" },
+        ];
+      }
+      await stepOneZengmPhase();
+      await waitForUpstreamSimulation();
+    }
+    return [{ type: "advance_complete", reason: "hit_step_limit" }];
+  };
+
+  const assertMilestoneReached = async (
+    target: AdvanceInput["target"],
+    seasonBefore: number,
+    phaseBefore: number,
+    dayBefore: number | undefined,
+  ): Promise<boolean> => {
+    const minimumPhase = MILESTONE_MINIMUM_PHASE[target];
+    const dayAfter = currentDay();
+    const reached = await milestoneReached(target, seasonBefore);
+    const progressed =
+      season() > seasonBefore ||
+      phaseNum() !== phaseBefore ||
+      (dayAfter !== undefined &&
+        dayBefore !== undefined &&
+        dayAfter > dayBefore);
+    return reached || (minimumPhase === undefined && progressed);
   };
 
   const stepOneZengmPhase = async (): Promise<void> => {
@@ -343,6 +737,7 @@ export function createBasketballGmAdapter(
 
   const nextDecisionLabel = async (): Promise<string> => {
     if (await isBlockedOnUserDraftPick()) return "make_draft_pick";
+    if (await hasPendingResigningNegotiations()) return "negotiate_contract";
     const phase = phaseNum();
     if (
       phase === ZENGM_PHASE.REGULAR_SEASON ||
@@ -364,13 +759,22 @@ export function createBasketballGmAdapter(
       "checkpoint",
     ];
     const blocked = await isBlockedOnUserDraftPick();
+    const pendingResignings = await hasPendingResigningNegotiations();
     if (!blocked) {
-      categories.push(
-        "execute_trade",
-        "set_lineup",
-        "release_player",
-        "negotiate_contract",
-        "sign_free_agent",
+      categories.push("execute_trade", "set_lineup", "release_player");
+      if (phaseNum() === ZENGM_PHASE.RESIGN_PLAYERS) {
+        categories.push("negotiate_contract");
+      } else if (phaseNum() === ZENGM_PHASE.FREE_AGENCY) {
+        categories.push("sign_free_agent");
+      }
+    }
+    if (pendingResignings) {
+      return categories.filter(
+        (category) =>
+          category === "get_state" ||
+          category === "get_options" ||
+          category === "checkpoint" ||
+          category === "negotiate_contract",
       );
     }
     if (blocked) categories.push("make_draft_pick");
@@ -402,9 +806,10 @@ export function createBasketballGmAdapter(
       lid: 0,
       name: `MCP ${input.episodeId}`,
       setLeagueCreationStatus: (status: unknown) => {
-        console.error(
-          `bbgm-bridge: league creation status: ${JSON.stringify(status)}`,
-        );
+        if (process.env["BBGM_BRIDGE_VERBOSE"] === "1")
+          console.error(
+            `bbgm-bridge: league creation status: ${JSON.stringify(status)}`,
+          );
       },
       settings: zengm.newLeague.getDefaultSettings(),
       shuffleRosters: false,
@@ -419,6 +824,22 @@ export function createBasketballGmAdapter(
     requireCreated();
     const tid = userTid();
     const currentSeason = season();
+    const cumulativeRecord = await cumulativeUserRecord(tid);
+
+    // Basketball GM deliberately does not cache historical events when a
+    // league is loaded (Cache.storeInfos.events has no getData hook). Reading
+    // idb.cache.events after importSnapshot therefore returns only events
+    // created since the restore, which makes an otherwise faithful rollback
+    // appear to have changed state. Read the durable store directly so
+    // recentTransactions remains stable across snapshot round trips.
+    await idb.cache.flush();
+    const league = idb.league;
+    if (!league) throw new Error("No active league to read events from");
+    const eventTransaction = league.transaction(["events"]);
+    const eventRows = (await eventTransaction
+      .objectStore("events")
+      .getAll()) as RawEventRow[];
+    await eventTransaction.done;
 
     const [
       rawTeams,
@@ -427,7 +848,6 @@ export function createBasketballGmAdapter(
       undraftedRows,
       draftPickRows,
       scheduleRows,
-      eventRows,
       payroll,
     ] = await Promise.all([
       idb.cache.teams.getAll(),
@@ -442,7 +862,6 @@ export function createBasketballGmAdapter(
       ),
       idb.cache.draftPicks.indexGetAll("draftPicksByTid", tid),
       idb.cache.schedule.getAll(),
-      idb.cache.events.getAll(),
       core.team.getPayroll(tid),
     ]);
 
@@ -477,6 +896,15 @@ export function createBasketballGmAdapter(
     const salaryCap = (g.get("salaryCap") as number) ?? 0;
     const luxuryTaxThreshold = (g.get("luxuryPayroll") as number) ?? 0;
     const hardCapActive = g.get("salaryCapType") === "hard";
+    // Over the cap, zengm still permits minimum-salary signings
+    // (contractNegotiation/accept.ts). Surface the bound so a policy can find
+    // that legal move instead of deadlocking.
+    const rosterMin =
+      (g.get("minRosterSize") as number | undefined) ?? undefined;
+    const rosterMax =
+      (g.get("maxRosterSize") as number | undefined) ?? undefined;
+    const minContract = (g.get("minContract") as number) ?? 0;
+    const maxContract = (g.get("maxContract") as number) ?? 0;
 
     const transactions = eventRows
       .map((row) => mapTransactionRecord(row))
@@ -499,11 +927,16 @@ export function createBasketballGmAdapter(
     } catch {
       dayValue = undefined;
     }
+    const employment = employmentStatus();
+    const rosterEnrichmentCache = await rosterEnrichment(tid);
 
     return {
       season: currentSeason,
       phase: phaseFromZengm(phaseNum()),
+      ...(rosterMin === undefined ? {} : { rosterMin }),
+      ...(rosterMax === undefined ? {} : { rosterMax }),
       ...(dayValue !== undefined ? { day: dayValue } : {}),
+      ...(employment === undefined ? {} : { employmentStatus: employment }),
       userTeam: mapTeamSummary({
         team: userTeamRow,
         teamSeason: userTeamSeason,
@@ -511,20 +944,29 @@ export function createBasketballGmAdapter(
         salaryCap,
         luxuryTaxThreshold,
         hardCapActive,
+        minContract,
+        maxContract,
         standingRank: userStandingRank,
         conferenceName:
           confName.get(userTeamRow.cid) ?? String(userTeamRow.cid),
         divisionName: divName.get(userTeamRow.did) ?? String(userTeamRow.did),
       }),
-      roster: normalizeRosterOrder(
-        rawRoster.map((p) => mapPlayerToSummary(p, currentSeason)),
-      ).sort((a, b) => b.overall - a.overall),
+      ...(cumulativeRecord === undefined ? {} : { cumulativeRecord }),
+      roster: applyEnrichment(
+        normalizeRosterOrder(
+          rawRoster.map((p) => mapPlayerToSummary(p, currentSeason)),
+        ).sort((a, b) => b.overall - a.overall),
+        rosterEnrichmentCache,
+      ),
       freeAgents: freeAgentRows
         .map((p) => mapPlayerToSummary(p, currentSeason))
         .sort((a, b) => b.overall - a.overall),
       draftProspects: undraftedRows
         .map((p) => mapProspectToSummary(p, currentSeason))
         .sort((a, b) => b.scoutedOverall - a.scoutedOverall),
+      draftPicks: (await idb.cache.draftPicks.getAll()).map((pick) =>
+        mapDraftPickToSummary(pick, currentSeason),
+      ),
       ownedPicks: draftPickRows.map((pick) =>
         mapDraftPickToSummary(pick, currentSeason),
       ),
@@ -536,6 +978,92 @@ export function createBasketballGmAdapter(
     };
   };
 
+  /** Per-player enrichment from zengm's own roster view, keyed by pid.
+   * Raw IndexedDB rows carry none of this: mood/willingness, ratings deltas,
+   * skill tags, engine valuation, tradability or production. Returns an empty
+   * map when the view is unavailable so callers degrade to the raw mapping
+   * rather than failing. */
+  const rosterEnrichment = async (
+    tid: number,
+  ): Promise<Map<number, Partial<PlayerSummary>>> => {
+    const out = new Map<number, Partial<PlayerSummary>>();
+    const rosterView = zengm.views?.roster;
+    if (!rosterView) return out;
+    let view: unknown;
+    try {
+      view = await rosterView({
+        tid,
+        season: season(),
+        playoffs: "regularSeason",
+      });
+    } catch {
+      return out;
+    }
+    const players = (view as { players?: unknown[] } | undefined)?.players;
+    if (!Array.isArray(players)) return out;
+    for (const raw of players) {
+      const p = raw as {
+        pid?: number;
+        untradable?: unknown;
+        ratings?: { dovr?: number; dpot?: number; skills?: unknown };
+        mood?: {
+          user?: {
+            willing?: boolean;
+            probWilling?: number;
+            contractAmount?: number;
+          };
+        };
+        stats?: Record<string, number>;
+      };
+      if (typeof p.pid !== "number") continue;
+      const mood = p.mood?.user;
+      const stats = p.stats ?? {};
+      const entry: Partial<PlayerSummary> = {};
+      if (typeof p.ratings?.dovr === "number")
+        entry.overallChange = p.ratings.dovr;
+      if (typeof p.ratings?.dpot === "number")
+        entry.potentialChange = p.ratings.dpot;
+      if (Array.isArray(p.ratings?.skills))
+        entry.skills = p.ratings.skills.filter(
+          (skill): skill is string => typeof skill === "string",
+        );
+      if (typeof p.untradable === "boolean") entry.untradable = p.untradable;
+      if (typeof mood?.willing === "boolean")
+        entry.willingToNegotiate = mood.willing;
+      if (typeof mood?.probWilling === "number")
+        entry.probWilling = mood.probWilling;
+      // zengm stores money in thousands; the wrapper reports millions.
+      if (typeof mood?.contractAmount === "number")
+        entry.askingAmount = mood.contractAmount / 1000;
+      for (const [key, field] of [
+        ["yearsWithTeam", "yearsWithTeam"],
+        ["gp", "gamesPlayed"],
+        ["min", "minutesPerGame"],
+        ["pts", "pointsPerGame"],
+        ["trb", "reboundsPerGame"],
+        ["ast", "assistsPerGame"],
+        ["per", "per"],
+      ] as const) {
+        const value = stats[key];
+        if (typeof value === "number" && Number.isFinite(value))
+          (entry as Record<string, number>)[field] = value;
+      }
+      out.set(p.pid, entry);
+    }
+    return out;
+  };
+
+  const applyEnrichment = (
+    players: PlayerSummary[],
+    enrichment: Map<number, Partial<PlayerSummary>>,
+  ): PlayerSummary[] =>
+    enrichment.size === 0
+      ? players
+      : players.map((player) => {
+          const extra = enrichment.get(player.pid);
+          return extra ? { ...player, ...extra } : player;
+        });
+
   const getTeamRoster = async (params: {
     tid: number;
   }): Promise<PlayerSummary[]> => {
@@ -544,9 +1072,273 @@ export function createBasketballGmAdapter(
       "playersByTid",
       params.tid,
     );
-    return normalizeRosterOrder(
-      rows.map((p) => mapPlayerToSummary(p, season())),
-    ).sort((a, b) => b.overall - a.overall);
+    const enrichment = await rosterEnrichment(params.tid);
+    return applyEnrichment(
+      normalizeRosterOrder(
+        rows.map((p) => mapPlayerToSummary(p, season())),
+      ).sort((a, b) => b.overall - a.overall),
+      enrichment,
+    );
+  };
+
+  /** Deep single-player detail for bbgm_get_player, sourced from zengm's own
+   * player worker view (src/worker/views/player.ts) rather than hand-mapped
+   * IndexedDB rows -- that view already returns the full per-season ratings
+   * and stats history (basic + advanced, computed by
+   * worker/util/advStats.basketball.ts) plus contract schedule, awards,
+   * draft info, and injury history in one call. See docs/INFORMATION_AUDIT.md.
+   *
+   * Deliberately excludes zengm's internal `value` field: that is the same
+   * composite valuation the trade AI uses to judge offers, so surfacing it
+   * would leak the counterparty's utility function to the policy.
+   *
+   * Maps defensively -- an unknown pid, a missing view, or an unexpected
+   * shape all degrade to a mostly-empty PlayerDetail (just the requested
+   * pid) rather than throwing, matching rosterEnrichment()'s convention
+   * above. */
+  const getPlayer = async (params: { pid: number }): Promise<PlayerDetail> => {
+    requireCreated();
+    const empty: PlayerDetail = {
+      pid: params.pid,
+      ratingsHistory: [],
+      statsHistory: [],
+      contractSchedule: [],
+      awards: [],
+      injuryHistory: [],
+    };
+    const playerView = zengm.views?.player;
+    if (!playerView) return empty;
+    let view: unknown;
+    try {
+      view = await playerView({ pid: params.pid });
+    } catch {
+      return empty;
+    }
+    const raw = view as
+      | { player?: unknown; bestPos?: unknown; errorMessage?: unknown }
+      | undefined;
+    const p = raw?.player;
+    if (typeof p !== "object" || p === null) return empty;
+    const player = p as {
+      pid?: unknown;
+      name?: unknown;
+      age?: unknown;
+      tid?: unknown;
+      contract?: { amount?: unknown; exp?: unknown };
+      salaries?: unknown[];
+      awards?: unknown[];
+      injury?: { type?: unknown; gamesRemaining?: unknown };
+      injuries?: unknown[];
+      draft?: {
+        year?: unknown;
+        round?: unknown;
+        pick?: unknown;
+        originalTid?: unknown;
+      };
+      ratings?: unknown[];
+      stats?: unknown[];
+    };
+
+    let latestPos: string | undefined;
+    const ratingsHistory: PlayerRatingsSeason[] = Array.isArray(player.ratings)
+      ? player.ratings
+          .map((row): PlayerRatingsSeason | undefined => {
+            if (typeof row !== "object" || row === null) return undefined;
+            const r = row as Record<string, unknown>;
+            if (typeof r["season"] !== "number") return undefined;
+            if (typeof r["pos"] === "string") latestPos = r["pos"];
+            const entry: PlayerRatingsSeason = { season: r["season"] };
+            if (typeof r["tid"] === "number") entry.teamId = r["tid"];
+            if (typeof r["age"] === "number") entry.age = r["age"];
+            if (typeof r["ovr"] === "number") entry.overall = r["ovr"];
+            if (typeof r["pot"] === "number") entry.potential = r["pot"];
+            // zengm's own rating key is "stre"; the wrapper reports it as
+            // "str" to match the standard 15-rating shorthand.
+            for (const [key, field] of [
+              ["hgt", "hgt"],
+              ["stre", "str"],
+              ["spd", "spd"],
+              ["jmp", "jmp"],
+              ["endu", "endu"],
+              ["ins", "ins"],
+              ["dnk", "dnk"],
+              ["ft", "ft"],
+              ["fg", "fg"],
+              ["tp", "tp"],
+              ["oiq", "oiq"],
+              ["diq", "diq"],
+              ["drb", "drb"],
+              ["pss", "pss"],
+              ["reb", "reb"],
+            ] as const) {
+              const value = r[key];
+              if (typeof value === "number")
+                (entry as unknown as Record<string, number>)[field] = value;
+            }
+            if (Array.isArray(r["skills"]))
+              entry.skills = r["skills"].filter(
+                (skill): skill is string => typeof skill === "string",
+              );
+            return entry;
+          })
+          .filter((entry): entry is PlayerRatingsSeason => entry !== undefined)
+      : [];
+
+    const statsHistory: PlayerStatsSeason[] = Array.isArray(player.stats)
+      ? player.stats
+          .map((row): PlayerStatsSeason | undefined => {
+            if (typeof row !== "object" || row === null) return undefined;
+            const s = row as Record<string, unknown>;
+            if (typeof s["season"] !== "number") return undefined;
+            const entry: PlayerStatsSeason = {
+              season: s["season"],
+              playoffs: s["playoffs"] === true,
+            };
+            if (typeof s["tid"] === "number") entry.teamId = s["tid"];
+            for (const [key, field] of [
+              ["gp", "gamesPlayed"],
+              ["min", "minutesPerGame"],
+              ["pts", "pointsPerGame"],
+              ["trb", "reboundsPerGame"],
+              ["ast", "assistsPerGame"],
+              ["stl", "stealsPerGame"],
+              ["blk", "blocksPerGame"],
+              ["tov", "turnoversPerGame"],
+              ["fgp", "fieldGoalPct"],
+              ["tpp", "threePointPct"],
+              ["ftp", "freeThrowPct"],
+              ["per", "per"],
+              ["ows", "offensiveWinShares"],
+              ["dws", "defensiveWinShares"],
+              ["ws", "winShares"],
+              ["ws48", "winSharesPer48"],
+              ["obpm", "offensiveBPM"],
+              ["dbpm", "defensiveBPM"],
+              ["bpm", "bpm"],
+              ["vorp", "vorp"],
+              ["tsp", "trueShootingPct"],
+              ["usgp", "usagePct"],
+            ] as const) {
+              const value = s[key];
+              if (typeof value === "number" && Number.isFinite(value))
+                (entry as unknown as Record<string, number>)[field] = value;
+            }
+            return entry;
+          })
+          .filter((entry): entry is PlayerStatsSeason => entry !== undefined)
+      : [];
+
+    // zengm's playersPlus() already converts both `contract.amount` and each
+    // `salaries[].amount` to millions of dollars for this attrs/season
+    // combination (unlike rosterEnrichment's mood.contractAmount above,
+    // which is raw thousands) -- see
+    // worker/db/getCopies/playersPlus.ts's "contract"/"salaries" attr
+    // handling. No further division here.
+    const contractSchedule: PlayerContractYear[] = Array.isArray(
+      player.salaries,
+    )
+      ? player.salaries
+          .map((row): PlayerContractYear | undefined => {
+            if (typeof row !== "object" || row === null) return undefined;
+            const c = row as Record<string, unknown>;
+            if (
+              typeof c["season"] !== "number" ||
+              typeof c["amount"] !== "number" ||
+              (c["type"] !== "past" &&
+                c["type"] !== "current" &&
+                c["type"] !== "future")
+            )
+              return undefined;
+            return {
+              season: c["season"],
+              amount: c["amount"],
+              type: c["type"],
+            };
+          })
+          .filter((entry): entry is PlayerContractYear => entry !== undefined)
+      : [];
+
+    const awards: PlayerAward[] = Array.isArray(player.awards)
+      ? player.awards
+          .map((row): PlayerAward | undefined => {
+            if (typeof row !== "object" || row === null) return undefined;
+            const a = row as Record<string, unknown>;
+            if (
+              typeof a["season"] !== "number" ||
+              typeof a["type"] !== "string"
+            )
+              return undefined;
+            return { season: a["season"], type: a["type"] };
+          })
+          .filter((entry): entry is PlayerAward => entry !== undefined)
+      : [];
+
+    const injuryHistory: PlayerInjuryHistoryEntry[] = Array.isArray(
+      player.injuries,
+    )
+      ? player.injuries
+          .map((row): PlayerInjuryHistoryEntry | undefined => {
+            if (typeof row !== "object" || row === null) return undefined;
+            const i = row as Record<string, unknown>;
+            if (typeof i["type"] !== "string") return undefined;
+            const entry: PlayerInjuryHistoryEntry = { type: i["type"] };
+            if (typeof i["season"] === "number") entry.season = i["season"];
+            if (typeof i["games"] === "number") entry.games = i["games"];
+            return entry;
+          })
+          .filter(
+            (entry): entry is PlayerInjuryHistoryEntry => entry !== undefined,
+          )
+      : [];
+
+    let draft: PlayerDraftInfo | undefined;
+    if (typeof player.draft === "object" && player.draft !== null) {
+      const d = player.draft as Record<string, unknown>;
+      const entry: PlayerDraftInfo = {};
+      if (typeof d["year"] === "number") entry.year = d["year"];
+      if (typeof d["round"] === "number") entry.round = d["round"];
+      if (typeof d["pick"] === "number") entry.pick = d["pick"];
+      if (typeof d["originalTid"] === "number")
+        entry.originalTeamId = d["originalTid"];
+      if (Object.keys(entry).length > 0) draft = entry;
+    }
+
+    let currentInjury: { type: string; gamesRemaining: number } | undefined;
+    if (typeof player.injury === "object" && player.injury !== null) {
+      const inj = player.injury as Record<string, unknown>;
+      if (
+        typeof inj["type"] === "string" &&
+        typeof inj["gamesRemaining"] === "number"
+      ) {
+        currentInjury = {
+          type: inj["type"],
+          gamesRemaining: inj["gamesRemaining"],
+        };
+      }
+    }
+
+    const position = typeof raw?.bestPos === "string" ? raw.bestPos : latestPos;
+
+    return {
+      pid: params.pid,
+      ...(typeof player.name === "string" ? { name: player.name } : {}),
+      ...(typeof player.age === "number" ? { age: player.age } : {}),
+      ...(position !== undefined ? { position } : {}),
+      ...(typeof player.tid === "number" ? { teamId: player.tid } : {}),
+      ratingsHistory,
+      statsHistory,
+      ...(typeof player.contract?.amount === "number"
+        ? { contractAmount: player.contract.amount }
+        : {}),
+      ...(typeof player.contract?.exp === "number"
+        ? { contractExpires: player.contract.exp }
+        : {}),
+      contractSchedule,
+      awards,
+      ...(draft !== undefined ? { draft } : {}),
+      ...(currentInjury !== undefined ? { currentInjury } : {}),
+      injuryHistory,
+    };
   };
 
   const getOptions = async (): Promise<EngineOption[]> => {
@@ -572,9 +1364,16 @@ export function createBasketballGmAdapter(
         "playersByTid",
         constants.PLAYER["FREE_AGENT"] ?? -1,
       );
-      for (const p of freeAgentRows)
+      const isResigning = phaseNum() === ZENGM_PHASE.RESIGN_PLAYERS;
+      const candidateRows = isResigning
+        ? (
+            await idb.cache.players.indexGetAll("playersByTid", userTid())
+          ).filter((player) => player.contract.exp <= season())
+        : freeAgentRows;
+      const type = isResigning ? "negotiate_contract" : "sign_free_agent";
+      for (const p of candidateRows)
         options.push({
-          type: "sign_free_agent",
+          type,
           pid: p.pid,
           name: `${p.firstName} ${p.lastName}`,
         });
@@ -695,6 +1494,11 @@ export function createBasketballGmAdapter(
     const error = await api.main.releasePlayer({ pids: [input.pid] });
     if (error)
       throw new Error(`Could not release player ${input.pid}: ${error}`);
+    // BBGM can leave a resigning negotiation row behind when a player is
+    // released before the resigning phase. Remove that orphaned row so a
+    // later advance is not permanently blocked on a player who is no longer
+    // on the user's roster.
+    await idb.cache.negotiations.delete(input.pid);
     await idb.cache.flush();
     return [{ type: "release", pid: input.pid }];
   };
@@ -709,13 +1513,22 @@ export function createBasketballGmAdapter(
       userTid(),
     );
     if (typeof negotiationOrError !== "string") {
+      // The real UI persists the negotiation before opening the negotiation
+      // page. Resigning leagues can already contain these rows when the
+      // headless episode starts, so only add the row when it is not present;
+      // blindly adding it causes a duplicate-key failure on a valid retry.
+      const existingNegotiation = await idb.cache.negotiations.get(input.pid);
+      if (!existingNegotiation) {
+        await idb.cache.negotiations.add(negotiationOrError);
+      }
       const acceptError = await api.main.acceptContractNegotiation({
         pid: input.pid,
         amount: input.amount * 1000,
         exp: season() + input.years,
       });
-      if (acceptError)
+      if (typeof acceptError === "string") {
         throw new Error(`Could not extend player ${input.pid}: ${acceptError}`);
+      }
     } else {
       // See compatibility.ts ("negotiateContract"): zengm has no real
       // negotiation path for a currently-rostered player who is not a free
@@ -752,8 +1565,12 @@ export function createBasketballGmAdapter(
       userTid(),
     );
     if (typeof negotiationOrError === "string") {
-      throw new Error(
+      throw new EngineActionRejectedError(
         `Could not sign free agent ${input.pid}: ${negotiationOrError}`,
+        {
+          pid: input.pid,
+          reason: "upstream_negotiation_preflight_rejected",
+        },
       );
     }
     const acceptError = await api.main.acceptContractNegotiation({
@@ -761,7 +1578,7 @@ export function createBasketballGmAdapter(
       amount: input.amount * 1000,
       exp: season() + input.years,
     });
-    if (acceptError)
+    if (typeof acceptError === "string")
       throw new Error(`Could not sign free agent ${input.pid}: ${acceptError}`);
     await idb.cache.flush();
     return [
@@ -796,16 +1613,72 @@ export function createBasketballGmAdapter(
       return events;
     };
 
-    if (await isBlockedOnUserDraftPick())
+    if (await isBlockedOnUserDecision())
       return stop("blocked_pending_decision");
 
     const phaseBefore = phaseNum();
     const seasonBefore = season();
+    const dayBefore = currentDay();
+
+    const playMenuAction = PLAY_MENU_TARGET_ACTION[input.target];
+    if (playMenuAction !== undefined) {
+      // The headless worker cannot answer upstream's resigning confirmation
+      // dialog. Treat this explicit target the same way the phase-step path
+      // treats it: a deliberate user request to proceed to free agency.
+      if (
+        playMenuAction === "untilFreeAgency" &&
+        phaseNum() === ZENGM_PHASE.RESIGN_PLAYERS
+      ) {
+        await core.phase.newPhase(ZENGM_PHASE.FREE_AGENCY, conditions);
+        await waitForUpstreamSimulation();
+      } else {
+        const fn = api.playMenu[playMenuAction];
+        if (!fn) {
+          throw new Error(
+            `Basketball GM adapter: api.playMenu.${playMenuAction} was not found on the imported zengm module`,
+          );
+        }
+        try {
+          await fn(undefined, conditions);
+          await waitForUpstreamSimulation();
+        } catch (error) {
+          // Some real leagues do not materialize the synthetic All-Star or
+          // trade-deadline marker in the schedule returned by the upstream
+          // helper. In that case the helper throws before starting any
+          // simulation. Use the awaited day-step controller, which reaches
+          // the same milestone without relying on that optional marker and
+          // keeps the failed helper call out of the mutation/rollback path.
+          if (
+            input.target === "until_all_star_game" ||
+            input.target === "until_trade_deadline"
+          ) {
+            return advanceByPhaseStepsUntilMilestone(
+              input.target,
+              seasonBefore,
+            );
+          }
+          throw error;
+        }
+      }
+      const reached = await assertMilestoneReached(
+        input.target,
+        seasonBefore,
+        phaseBefore,
+        dayBefore,
+      );
+      if (reached) return stop(`completed_${input.target}`);
+      // Some pinned BBGM play-menu helpers legitimately return after
+      // scheduling zero days (for example a freshly-created regular-season
+      // schedule can lack a special marker until the first day step). Fall
+      // back to the same bounded phase-step controller used by next_decision
+      // instead of declaring success or surfacing a spurious no-op failure.
+      return advanceByPhaseStepsUntilMilestone(input.target, seasonBefore);
+    }
 
     switch (input.target) {
       case "next_game": {
         for (let step = 0; step < MAX_ADVANCE_STEPS; step += 1) {
-          if (await isBlockedOnUserDraftPick())
+          if (await isBlockedOnUserDecision())
             return stop("blocked_pending_decision");
           const before = await getUserGamesPlayed();
           await stepOneZengmPhase();
@@ -821,7 +1694,7 @@ export function createBasketballGmAdapter(
       case "days": {
         const count = input.count ?? 1;
         for (let i = 0; i < count; i += 1) {
-          if (await isBlockedOnUserDraftPick())
+          if (await isBlockedOnUserDecision())
             return stop("blocked_pending_decision");
           await api.playMenu["day"]?.(undefined, conditions);
         }
@@ -835,7 +1708,7 @@ export function createBasketballGmAdapter(
           step < MAX_ADVANCE_STEPS && played < count;
           step += 1
         ) {
-          if (await isBlockedOnUserDraftPick())
+          if (await isBlockedOnUserDecision())
             return stop("blocked_pending_decision");
           const before = await getUserGamesPlayed();
           await stepOneZengmPhase();
@@ -852,7 +1725,7 @@ export function createBasketballGmAdapter(
       case "next_decision":
       case "phase": {
         for (let step = 0; step < MAX_ADVANCE_STEPS; step += 1) {
-          if (await isBlockedOnUserDraftPick())
+          if (await isBlockedOnUserDecision())
             return stop("blocked_pending_decision");
           await stepOneZengmPhase();
           if (phaseNum() !== phaseBefore) return stop("reached_next_phase");
@@ -861,7 +1734,7 @@ export function createBasketballGmAdapter(
       }
       case "season_end": {
         for (let step = 0; step < MAX_ADVANCE_STEPS; step += 1) {
-          if (await isBlockedOnUserDraftPick())
+          if (await isBlockedOnUserDecision())
             return stop("blocked_pending_decision");
           await stepOneZengmPhase();
           if (season() !== seasonBefore) return stop("season_complete");
@@ -892,7 +1765,7 @@ export function createBasketballGmAdapter(
   };
 
   const importSnapshot = async (snapshot: unknown): Promise<void> => {
-    const typed = snapshot as { lid: number; data: Record<string, unknown[]> };
+    const typed = parseLeagueSnapshot(snapshot);
     await core.league.close(true);
     const connection = await db.connectLeague(typed.lid);
     const storeNames = Object.keys(typed.data);
@@ -904,7 +1777,28 @@ export function createBasketballGmAdapter(
     }
     await transaction.done;
     connection.close();
+
+    // IndexedDB is installed per worker, so a fresh worker has no
+    // meta.leagues entry for the restored league. The league database can be
+    // reconstructed from the snapshot, but beforeLeague() checks the
+    // separate meta database first and otherwise throws the upstream
+    // "League not found." error. Recreate only the metadata that the normal
+    // league-loading path needs; simulation state remains in the snapshot.
+    await idb.meta.put("leagues", leagueMetadataFromSnapshot(typed));
     await zengm.beforeView.beforeLeague(typed.lid, {});
+    const restoredLeague = db.idb.league;
+    if (!restoredLeague) throw new Error("Restored league did not reconnect");
+    const verificationTransaction = restoredLeague.transaction(["events"]);
+    const restoredEventCount = (
+      await verificationTransaction.objectStore("events").getAll()
+    ).length;
+    await verificationTransaction.done;
+    const expectedEventCount = typed.data["events"]?.length ?? 0;
+    if (restoredEventCount !== expectedEventCount) {
+      throw new Error(
+        `Restored league event count mismatch: expected ${expectedEventCount}, got ${restoredEventCount}`,
+      );
+    }
     created = true;
   };
 
@@ -921,6 +1815,7 @@ export function createBasketballGmAdapter(
     create,
     getRawState,
     getTeamRoster,
+    getPlayer,
     getOptions,
     evaluateTrade,
     executeTrade,

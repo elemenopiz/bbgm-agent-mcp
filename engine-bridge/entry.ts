@@ -36,15 +36,27 @@ import {
 import { createBasketballGmAdapter } from "../src/engine/bbgm/adapter.js";
 
 type Request = { id: number; method: string; params?: unknown };
-type ResponseError = { message: string; stack?: string };
+type ResponseError = {
+  message: string;
+  stack?: string;
+  code?: string;
+  retryable?: boolean;
+  rollbackRequired?: boolean;
+  details?: Record<string, unknown>;
+};
 type Response = { id: number; result?: unknown; error?: ResponseError };
 
 if (!parentPort)
   throw new Error("Basketball GM bridge must run in a worker thread");
 const port = parentPort;
 
+const bridgeLog = (...values: unknown[]): void => {
+  if (process.env["BBGM_BRIDGE_VERBOSE"] === "1") console.error(...values);
+};
+
 const { sourceDir } = workerData as { sourceDir: string };
 await installWorkerGlobals(sourceDir);
+let seededRandom: ReturnType<typeof installSeededRandom> | undefined;
 
 // Every zengm module the adapter needs. Imported here (after
 // installWorkerGlobals, before anything touches indexedDB/self/window) and
@@ -87,6 +99,17 @@ const bbgm = (
   globalThis as unknown as { bbgm: { api: Record<string, unknown> } }
 ).bbgm;
 
+// zengm's own worker views are the curated data API its UI renders from.
+// They are importable here because build-engine-bridge.ts bundles this file
+// *inside* the checkout, so "../src/..." resolves for real. Sourcing player
+// information from these instead of hand-mapping IndexedDB rows keeps the
+// wrapper aligned with upstream and surfaces mood/ratings/stats the raw rows
+// do not carry. See docs/INFORMATION_AUDIT.md.
+const zengmViews = (await import("../src/worker/views/index.ts")) as Record<
+  string,
+  (inputs: unknown, updateEvents: unknown, state: unknown) => Promise<unknown>
+>;
+
 const adapter = createBasketballGmAdapter({
   core: {
     player: { setContract: core.player.setContract },
@@ -105,7 +128,13 @@ const adapter = createBasketballGmAdapter({
     idb: database.idb,
     connectLeague: database.connectLeague,
   },
-  util: { g: util.g, helpers: util.helpers },
+  util: { g: util.g, helpers: util.helpers, lock: util.lock },
+  views: {
+    roster: async (inputs: unknown) =>
+      zengmViews["roster"]?.(inputs, ["firstRun"], {}),
+    player: async (inputs: unknown) =>
+      zengmViews["player"]?.(inputs, ["firstRun"], {}),
+  },
   // `bbgm.api`'s real type lives inside the zengm checkout, which this repo
   // has no compile-time dependency on -- narrow, documented compatibility
   // cast (this file is not part of the tsc --noEmit include set anyway; see
@@ -126,11 +155,12 @@ const handlers: Record<string, (params: any) => Promise<unknown>> = {
     // Seeded once per worker, right before the episode that owns this
     // worker is created -- see bootstrap.ts's installSeededRandom doc
     // comment for why this keeps episodes' randomness isolated.
-    installSeededRandom(params.seed);
+    seededRandom = installSeededRandom(params.seed);
     await adapter.create(params as Parameters<typeof adapter.create>[0]);
   },
   getRawState: async () => adapter.getRawState(),
   getTeamRoster: async (params) => adapter.getTeamRoster(params),
+  getPlayer: async (params) => adapter.getPlayer(params),
   getOptions: async () => adapter.getOptions(),
   evaluateTrade: async (params) => adapter.evaluateTrade(params),
   executeTrade: async (params) => adapter.executeTrade(params),
@@ -140,8 +170,36 @@ const handlers: Record<string, (params: any) => Promise<unknown>> = {
   signFreeAgent: async (params) => adapter.signFreeAgent(params),
   makeDraftPick: async (params) => adapter.makeDraftPick(params),
   advance: async (params) => adapter.advance(params),
-  exportSnapshot: async () => adapter.exportSnapshot(),
-  importSnapshot: async (params) => adapter.importSnapshot(params),
+  exportSnapshot: async () => {
+    const snapshot = await adapter.exportSnapshot();
+    if (!seededRandom)
+      throw new Error("Seeded random generator is not initialized");
+    return {
+      ...(snapshot as Record<string, unknown>),
+      __bbgmRng: {
+        algorithm: seededRandom.algorithm,
+        state: seededRandom.getState(),
+      },
+    };
+  },
+  importSnapshot: async (params) => {
+    const snapshot = params as {
+      __bbgmRng?: { algorithm?: unknown; state?: unknown };
+    };
+    const rng = snapshot.__bbgmRng;
+    seededRandom ??= installSeededRandom("snapshot-resume");
+    if (rng?.algorithm !== undefined && rng.algorithm !== "xorshift32-v1") {
+      throw new Error(
+        `Unsupported snapshot RNG algorithm: ${JSON.stringify(rng.algorithm)}`,
+      );
+    }
+    if (typeof rng?.state === "number") seededRandom.setState(rng.state);
+    await adapter.importSnapshot(params);
+    // Importing the IndexedDB snapshot should not consume randomness today,
+    // but restoring again after the load makes that invariant explicit and
+    // protects deterministic continuation if upstream load hooks change.
+    if (typeof rng?.state === "number") seededRandom.setState(rng.state);
+  },
   close: async () => adapter.close(),
 };
 
@@ -159,18 +217,35 @@ port.on("message", (request: Request) => {
     try {
       const handler = handlers[request.method];
       if (!handler) throw new Error(`Unknown bridge method: ${request.method}`);
-      console.error(`bbgm-bridge: ${request.method} start`);
+      bridgeLog(`bbgm-bridge: ${request.method} start`);
       response.result = await handler(request.params);
-      console.error(`bbgm-bridge: ${request.method} complete`);
+      bridgeLog(`bbgm-bridge: ${request.method} complete`);
     } catch (error) {
       const errorPayload: ResponseError =
         error instanceof Error
-          ? error.stack !== undefined
-            ? { message: error.message, stack: error.stack }
-            : { message: error.message }
+          ? {
+              message: error.message,
+              ...(error.stack === undefined ? {} : { stack: error.stack }),
+              ...("code" in error && typeof error.code === "string"
+                ? { code: error.code }
+                : {}),
+              ...("retryable" in error && typeof error.retryable === "boolean"
+                ? { retryable: error.retryable }
+                : {}),
+              ...("rollbackRequired" in error &&
+              typeof error.rollbackRequired === "boolean"
+                ? { rollbackRequired: error.rollbackRequired }
+                : {}),
+              ...("details" in error &&
+              typeof error.details === "object" &&
+              error.details !== null &&
+              !Array.isArray(error.details)
+                ? { details: error.details as Record<string, unknown> }
+                : {}),
+            }
           : { message: String(error) };
       response.error = errorPayload;
-      console.error(
+      bridgeLog(
         `bbgm-bridge: ${request.method} failed: ${errorPayload.message}`,
       );
     }

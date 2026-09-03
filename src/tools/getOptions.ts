@@ -22,7 +22,7 @@ export const registerGetOptions = (
     },
     async ({ episodeId }) => {
       try {
-        return success(await domain.getOptions(episodeId));
+        return success(await domain.getOptions(episodeId), optionsResultSchema);
       } catch (error) {
         return failure(error);
       }

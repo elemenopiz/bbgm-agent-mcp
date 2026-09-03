@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
-    name: format, lint, typecheck, test, build
+    name: format, lint, typecheck, build, test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -17,13 +25,14 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11
+          version: 11.0.0
 
-      - name: Set up Node.js 24
+      - name: Set up Node.js from .nvmrc
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -39,15 +48,20 @@ jobs:
 
       - name: Note on real-engine tests
         run: |
-          echo "This job does not set BBGM_SOURCE_DIR or BBGM_REAL_ENGINE."
+          test -z "${BBGM_SOURCE_DIR:-}"
+          test "${BBGM_REAL_ENGINE:-0}" != "1"
+          echo "This job intentionally does not set BBGM_SOURCE_DIR or BBGM_REAL_ENGINE."
           echo "Real-engine tests are gated behind BBGM_REAL_ENGINE=1 (see CONTRIBUTING.md)"
           echo "and require a separately obtained, license-encumbered Basketball GM / zengm"
           echo "checkout that this CI job intentionally does not provide."
           echo "The describe.skipIf(!runRealEngine, ...) guard in each such test file"
           echo "makes vitest report them as SKIPPED below, not as passed or missing."
 
+      - name: Build (required by compiled stdio E2E)
+        run: pnpm build
+
       - name: Test (engine-independent)
         run: pnpm test
 
-      - name: Build
-        run: pnpm build
+      - name: Verify build leaves tracked files unchanged
+        run: test -z "$(git status --short --untracked-files=no)"

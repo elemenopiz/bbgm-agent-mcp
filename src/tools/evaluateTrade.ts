@@ -28,7 +28,10 @@ export const registerEvaluateTrade = (
     },
     async ({ episodeId, proposal }) => {
       try {
-        return success(await domain.evaluateTrade(episodeId, proposal));
+        return success(
+          await domain.evaluateTrade(episodeId, proposal),
+          tradeEvaluationSchema,
+        );
       } catch (error) {
         return failure(error);
       }

@@ -25,6 +25,8 @@ const baseState: EngineRawState = {
     capSpace: 40,
     luxuryTaxThreshold: 168,
     hardCapActive: false,
+    minContract: 1.2,
+    maxContract: 45,
   },
   roster: Array.from({ length: 12 }, (_, i) => ({
     pid: i + 1,
@@ -41,6 +43,9 @@ const baseState: EngineRawState = {
   })),
   freeAgents: [],
   draftProspects: [],
+  draftPicks: [
+    { dpid: 1, season: 2027, round: 1, originalTeamId: 0, currentTeamId: 0 },
+  ],
   ownedPicks: [
     { dpid: 1, season: 2027, round: 1, originalTeamId: 0, currentTeamId: 0 },
   ],
@@ -67,6 +72,32 @@ describe("runBuiltinInvariants", () => {
       false,
     );
     expect(hasHardFailure(statuses)).toBe(true);
+  });
+
+  test("allows a short roster during the resigning/free-agency window", () => {
+    const state: EngineRawState = {
+      ...baseState,
+      phase: "resigning",
+      roster: baseState.roster.slice(0, 7),
+    };
+    const roster = runBuiltinInvariants(state, 2026).find(
+      (s) => s.code === "ROSTER_SIZE",
+    );
+    expect(roster?.satisfied).toBe(true);
+    expect(roster?.message).toContain("temporary short roster");
+  });
+
+  test("allows a short roster during free agency", () => {
+    const state: EngineRawState = {
+      ...baseState,
+      phase: "free_agency",
+      roster: baseState.roster.slice(0, 7),
+    };
+    const roster = runBuiltinInvariants(state, 2026).find(
+      (s) => s.code === "ROSTER_SIZE",
+    );
+    expect(roster?.satisfied).toBe(true);
+    expect(roster?.message).toContain("temporary short roster");
   });
 
   test("flags roster size above the maximum", () => {
@@ -138,6 +169,19 @@ describe("runBuiltinInvariants", () => {
     ).toBe(false);
   });
 
+  test("allows expiring contracts during the resigning window", () => {
+    const roster = [
+      { ...baseState.roster[0]!, contractExpires: 2025 },
+      ...baseState.roster.slice(1),
+    ];
+    const state: EngineRawState = { ...baseState, phase: "resigning", roster };
+    const contract = runBuiltinInvariants(state, 2026).find(
+      (s) => s.code === "VALID_CONTRACTS",
+    );
+    expect(contract?.satisfied).toBe(true);
+    expect(contract?.message).toContain("resigning");
+  });
+
   test("cap compliance is a soft constraint unless the hard cap is active", () => {
     const state: EngineRawState = {
       ...baseState,
@@ -192,7 +236,7 @@ describe("runBuiltinInvariants", () => {
 });
 
 describe("evaluateScenarioConstraints", () => {
-  test("an unregistered custom code is reported satisfied with a note, not silently dropped", () => {
+  test("an unregistered custom code is reported unsatisfied until creation rejects it", () => {
     const builtins = runBuiltinInvariants(baseState, 2026);
     const declared = evaluateScenarioConstraints(
       {
@@ -203,8 +247,8 @@ describe("evaluateScenarioConstraints", () => {
       },
       builtins,
     );
-    expect(declared[0]?.satisfied).toBe(true);
-    expect(declared[0]?.message).toContain("no built-in evaluator");
+    expect(declared[0]?.satisfied).toBe(false);
+    expect(declared[0]?.message).toContain("unsupported constraint evaluator");
   });
 
   test("a code matching a built-in reuses the built-in's satisfaction result", () => {

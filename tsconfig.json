@@ -21,6 +21,8 @@
     "src/**/*.ts",
     "scripts/**/*.ts",
     "scripts/**/*.mts",
+    "experiments/**/*.ts",
+    "experiments/**/*.mts",
     "tests/**/*.ts",
     "engine-bridge/**/*.ts",
     "vitest.config.ts"

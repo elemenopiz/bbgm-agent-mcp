@@ -111,6 +111,26 @@ describe("advanceInputSchema", () => {
     }
   });
 
+  test("accepts the full human-facing time-control surface", () => {
+    for (const target of [
+      "until_trade_deadline",
+      "until_draft",
+      "until_next_pick",
+      "until_free_agency",
+      "until_preseason",
+    ] as const) {
+      expect(advanceInputSchema.safeParse({ target }).success).toBe(true);
+    }
+    for (const target of ["week", "month", "one_pick"] as const) {
+      expect(advanceInputSchema.safeParse({ target }).success).toBe(true);
+    }
+    for (const target of ["days", "games"] as const) {
+      expect(advanceInputSchema.safeParse({ target, count: 1 }).success).toBe(
+        true,
+      );
+    }
+  });
+
   test("bounds count to a maximum of 30", () => {
     expect(
       advanceInputSchema.safeParse({ target: "games", count: 31 }).success,
@@ -177,6 +197,8 @@ describe("output schema conformance", () => {
         capSpace: 140,
         luxuryTaxThreshold: 168,
         hardCapActive: false,
+        minContract: 1.2,
+        maxContract: 45,
       },
       rosterCount: 12,
       rosterExcerpt: [],

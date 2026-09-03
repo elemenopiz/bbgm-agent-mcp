@@ -51,6 +51,7 @@ export const registerNegotiateContract = (
             { pid, amount, years },
             { expectedRevision, idempotencyKey },
           ),
+          mutationResultSchema,
         );
       } catch (error) {
         return failure(error);

@@ -232,20 +232,19 @@ With that checkout, the full spike checklist was actually run, via
 5. `getOptions()` — **passed.** Returns real, current legal actions (165 of
    them for a fresh preseason league).
 6. `advance({ target: "next_game" })` — **passed.**
-7. Bounded season-advance loop (`advance({ target: "phase" })` repeated,
-   auto-drafting the top prospect whenever blocked on the user's own pick)
-   — **passed.** Went preseason → regular_season → playoffs →
-   draft_lottery → draft (2 user picks made via `makeDraftPick`) →
-   resigning → free_agency → preseason, completing the full season
-   transition (2026 → 2027) in exactly 10 `advance()` calls, well inside the
-   20-call bound.
+7. Named milestone advance — **passed.** A real integration path now uses
+   `until_regular_season` → `until_trade_deadline` → `until_playoffs` →
+   `through_playoffs` → `until_draft` → `until_next_pick`, then makes the
+   user's draft pick. A separate bounded phase-step walk reaches the same
+   draft and resigning boundaries, and stops for an explicit contract decision
+   instead of silently skipping unsigned players.
 8. `exportSnapshot()` / `importSnapshot()` — **passed.** Round-tripped a
    real snapshot; post-import state (season/phase/roster size) matched
    pre-export state exactly.
 9. `advance({ target: "next_game" })` again, post-import — **passed**,
    confirming the restored league is still simulatable, not just readable.
 
-**Final result: `engine:smoke: PASSED in 51.6s`** (full run, including
+**Final result: `engine:smoke: PASSED in 27.6s`** (full run, including
 `engine:verify` and `engine:build`).
 
 ### Five real bugs found by actually running this, and fixed
@@ -335,15 +334,34 @@ succeeded — the first live cross-check that the two independent code paths
 `api.main.createTrade`+`proposeTrade` for execution) agree in practice, not
 just by inspection.
 
-**Not yet exercised**: multiple concurrent _mutating_ real episodes racing
-against each other (the concurrent-episode check that exists,
-`tests/integration/realEngine.test.ts`'s determinism test, only issues
-reads/advances, not a mix of every mutation type, concurrently); an
-`evaluateTrade` proposal that is legal but declined (every trade tried in
-testing so far was either illegal or accepted); and league saves customized
-beyond `CreateEpisodeInput`'s defaults (a >2-round draft, expansion/fantasy
-draft phases — see the `Phase mapping` and `DraftPickSummary.round` entries
-in `compatibility.ts`).
+### Adverse-path coverage pass
+
+The gated real-engine suite now also covers the previously untested
+decision-boundary cases:
+
+- `evaluateTrade` finds a bounded, salary-compatible proposal that is legal
+  but declined by the real opponent; `executeTrade` rejects that same
+  proposal, and the domain rollback preserves the revision, state hash, and
+  roster size.
+- Two real episodes execute mixed mutations concurrently (`setLineup`,
+  `releasePlayer`, `signFreeAgent`, `negotiateContract`, and `advance`). Each
+  remains at its own revision and retains only its own roster changes.
+- A custom league field such as `leagueConfig: { draftRounds: 3 }` is rejected
+  by strict `CreateEpisodeInput` validation before a real worker is started.
+  This is an explicit unsupported-configuration result, not a silent fallback
+  to a default league.
+
+Restart/resume is now covered against the real worker. The adapter reconstructs
+the separate `meta.leagues` record from the persisted snapshot before calling
+the pinned zengm `beforeLeague` path; a fresh worker then restores the same
+revision and state hash and remains usable. The real resume test is gated by
+`BBGM_REAL_ENGINE=1`, because it requires the separately obtained licensed
+checkout.
+
+Still not exercised is a genuinely imported custom save whose contents include
+more than two draft rounds or an expansion/fantasy draft. Those configurations
+remain unsupported (see the `Phase mapping` and `DraftPickSummary.round`
+entries in `compatibility.ts`) and are not fabricated in the default suite.
 
 ### Independently re-verified
 
@@ -352,8 +370,9 @@ the lead integration session, not just taken on trust from whichever
 session did the original work:
 
 - Re-ran `pnpm engine:smoke` from a clean state against the same checkout —
-  **passed again**, full season, real draft picks, snapshot round-trip,
-  ~49s.
+  **passed again**, reaching the draft and resigning decision boundary with
+  real draft picks, safe pending-contract stop, snapshot round-trip, and
+  post-restore advance in 27.6s.
 - A separate determinism check (two concurrent episodes, same seed
   `"real-determinism-seed-1"`, `create` + 3× `advance({target:"next_game"})`
   each) against the **real engine** produced byte-identical `stateHash`
@@ -366,6 +385,8 @@ session did the original work:
   sequence), confirmed the root cause was the `rosterOrder` collision (not
   something specific to the test harness), applied the `mappings.ts` fix,
   and re-ran to confirm it actually resolved the issue before trusting it.
+- Re-ran the fresh-worker restart/resume path after the metadata reconstruction
+  fix — **passed**, including persisted revision/state-hash verification.
 
 ## Known follow-ups
 
@@ -375,12 +396,14 @@ session did the original work:
   cost of reimplementing a small slice of zengm's own UI-thread contract.
   Not attempted.
 - A live cross-check that `evaluateTrade`'s dry-run verdict and
-  `executeTrade`'s real outcome agree on a _declined_ trade (only an
-  accepted-trade case has been exercised so far).
-- Racing multiple mutation types across multiple real concurrent episodes
-  (as opposed to the same mutation type, or reads/advances only).
+  `executeTrade`'s real outcome agree on a declined trade is now covered by
+  the gated adverse-path test.
+- Real-worker restart/resume is covered by the gated integration test. The
+  separate meta-database reconstruction is specific to the pinned engine and
+  must be re-verified whenever the engine pin changes.
 - Custom league configurations beyond what `CreateEpisodeInput` produces by
-  default (more than 2 draft rounds, expansion/fantasy drafts).
+  default (more than 2 draft rounds, expansion/fantasy drafts). The public
+  input is explicitly strict-rejected; imported custom saves remain untested.
 
 ## Upgrading the pinned commit
 

@@ -4,10 +4,12 @@ import type {
   Checkpoint,
   EngineRawState,
   EpisodeStatus,
-  MutationResult,
+  IdempotencyRecord,
   ScenarioConstraintSpec,
+  ScenarioPolicy,
 } from "../domain/types.js";
 import type { TrajectoryWriter } from "../persistence/trajectoryLog.js";
+import type { AttemptWriter } from "../persistence/attemptLog.js";
 
 export type EpisodeRecord = {
   readonly episodeId: string;
@@ -16,8 +18,11 @@ export type EpisodeRecord = {
   readonly userTeamId: number;
   readonly startingSeason: number;
   readonly constraints: ScenarioConstraintSpec;
+  readonly scenarioPolicy: ScenarioPolicy;
+  readonly initialSnapshotHash?: string;
   readonly engine: SimulationEngine;
   readonly trajectoryWriter: TrajectoryWriter;
+  readonly attemptWriter: AttemptWriter;
   readonly createdAt: string;
 
   revision: number;
@@ -26,6 +31,8 @@ export type EpisodeRecord = {
   trajectorySequence: number;
   invariantViolationCount: number;
   transactionEventCount: number;
+  stepCount: number;
+  attemptSequence: number;
   /**
    * Snapshot of the engine's last-observed raw state, captured right before
    * `dispose()` closes the engine (which, for the real worker-backed engine,
@@ -35,9 +42,11 @@ export type EpisodeRecord = {
    * implementation, not just ones where close() happens to be a no-op.
    */
   finalRawState?: EngineRawState;
+  /** Hash of the latest durable current snapshot, when one has been written. */
+  lastStateHash?: string;
   /** Promise chain enforcing one in-flight engine mutation at a time. */
   queue: Promise<void>;
-  readonly idempotency: Map<string, MutationResult>;
+  readonly idempotency: Map<string, IdempotencyRecord>;
   readonly checkpoints: Map<string, Checkpoint>;
 };
 
@@ -69,7 +78,7 @@ export class EpisodeStore {
     if (record.status !== "active") {
       throw new DomainError(
         "ILLEGAL_ACTION",
-        `Episode ${episodeId} has already ended`,
+        `Episode ${episodeId} is not active (status: ${record.status})`,
       );
     }
     return record;

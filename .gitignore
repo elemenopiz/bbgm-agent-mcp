@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 dist/
 coverage/
 .data/
@@ -7,3 +8,6 @@ coverage/
 *.log
 .DS_Store
 
+# Local secrets - never commit
+.env
+.env.local

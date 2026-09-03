@@ -7,12 +7,40 @@ export type EpisodeWorkerHostOptions = {
   workerScript: string;
   /** Data made available to the worker via `worker_threads.workerData`. */
   workerData: Record<string, unknown>;
+  /** Maximum time a single worker call may remain unresolved. */
+  callTimeoutMs?: number;
+  /** Optional V8 resource ceilings for this worker. */
+  resourceLimits?: {
+    maxOldGenerationSizeMb?: number;
+    maxYoungGenerationSizeMb?: number;
+    codeRangeSizeMb?: number;
+    stackSizeMb?: number;
+  };
 };
 
 type PendingCall = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 };
+
+export type WorkerHostErrorCode = "TIMEOUT" | "ENGINE_ERROR";
+
+export class WorkerHostError extends Error {
+  readonly code: WorkerHostErrorCode;
+  readonly retryable: boolean;
+
+  constructor(
+    code: WorkerHostErrorCode,
+    message: string,
+    options: { retryable?: boolean } = {},
+  ) {
+    super(message);
+    this.name = "WorkerHostError";
+    this.code = code;
+    this.retryable = options.retryable ?? false;
+  }
+}
 
 /**
  * Generic main-thread host for a single `node:worker_threads` Worker running
@@ -34,19 +62,39 @@ export class EpisodeWorkerHost {
   private nextId = 1;
   private terminated = false;
   private fatalError: Error | undefined;
+  private readonly callTimeoutMs: number;
 
   constructor(options: EpisodeWorkerHostOptions) {
     this.worker = new Worker(options.workerScript, {
       workerData: options.workerData,
+      ...(options.resourceLimits === undefined
+        ? {}
+        : { resourceLimits: options.resourceLimits }),
     });
+    this.callTimeoutMs = options.callTimeoutMs ?? 120_000;
 
     this.worker.on("message", (response: Response) => {
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
+      if (pending.timer) clearTimeout(pending.timer);
       if (response.error) {
         const error = new Error(response.error.message);
         if (response.error.stack) error.stack = response.error.stack;
+        Object.assign(error, {
+          ...(response.error.code === undefined
+            ? {}
+            : { code: response.error.code }),
+          ...(response.error.retryable === undefined
+            ? {}
+            : { retryable: response.error.retryable }),
+          ...(response.error.rollbackRequired === undefined
+            ? {}
+            : { rollbackRequired: response.error.rollbackRequired }),
+          ...(response.error.details === undefined
+            ? {}
+            : { details: response.error.details }),
+        });
         pending.reject(error);
       } else {
         pending.resolve(response.result);
@@ -54,18 +102,20 @@ export class EpisodeWorkerHost {
     });
 
     this.worker.on("error", (error: Error) => {
-      this.fatalError = error;
-      this.rejectAllPending(error);
+      const workerError = new WorkerHostError("ENGINE_ERROR", error.message);
+      if (error.stack !== undefined) workerError.stack = error.stack;
+      this.fatalError = workerError;
+      this.rejectAllPending(workerError);
     });
 
     this.worker.on("exit", (code: number) => {
-      if (code !== 0 && !this.terminated) {
-        const error = new Error(
-          `Episode worker exited unexpectedly with code ${code}`,
-        );
-        this.fatalError = error;
-        this.rejectAllPending(error);
-      }
+      if (this.terminated || this.fatalError) return;
+      const error = new WorkerHostError(
+        "ENGINE_ERROR",
+        `Episode worker exited unexpectedly with code ${code}`,
+      );
+      this.fatalError = error;
+      this.rejectAllPending(error);
     });
   }
 
@@ -89,9 +139,29 @@ export class EpisodeWorkerHost {
         resolve: (value) => resolve(value as T),
         reject,
       });
+      const pending = this.pending.get(id);
+      if (this.callTimeoutMs > 0 && pending) {
+        pending.timer = setTimeout(() => {
+          const timeout = new WorkerHostError(
+            "TIMEOUT",
+            `Episode worker call timed out after ${this.callTimeoutMs}ms`,
+            { retryable: true },
+          );
+          this.fatalError = timeout;
+          this.rejectAllPending(timeout);
+          this.terminated = true;
+          void this.worker.terminate();
+        }, this.callTimeoutMs);
+      }
       const request: Request =
         params === undefined ? { id, method } : { id, method, params };
-      this.worker.postMessage(request);
+      try {
+        this.worker.postMessage(request);
+      } catch (error) {
+        this.pending.delete(id);
+        if (pending?.timer) clearTimeout(pending.timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -104,7 +174,10 @@ export class EpisodeWorkerHost {
   }
 
   private rejectAllPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.pending.clear();
   }
 }

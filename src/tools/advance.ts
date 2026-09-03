@@ -21,7 +21,7 @@ export const registerAdvance = (
     {
       title: "Advance Simulation",
       description:
-        "Advance simulated time by a bounded target: next_game (play one game), next_decision (advance until the next GM decision point or one game, whichever first), days or games (advance an explicit count, max 30), phase (advance to the next league phase), or season_end (advance to the next preseason). Advancement always stops at a decision point requiring GM input (e.g. pending draft picks) even if the target isn't reached yet; the returned events include an advance_complete entry explaining why it stopped.",
+        "Advance simulated time by a bounded target: next_game, next_decision, explicit days/games, week, month, one_pick, phase, season_end, or a named upstream milestone such as until_trade_deadline, until_playoffs, until_draft, until_next_pick, until_free_agency, until_preseason, or until_regular_season. The episode's allowedAdvanceTargets policy can narrow this list. Advancement stops at a mandatory user decision such as a pending draft pick; the returned events include an advance_complete entry explaining why it stopped.",
       inputSchema: z
         .object({
           episodeId: episodeIdSchema,
@@ -52,6 +52,7 @@ export const registerAdvance = (
             count === undefined ? { target } : { target, count },
             { expectedRevision, idempotencyKey },
           ),
+          mutationResultSchema,
         );
       } catch (error) {
         return failure(error);

@@ -12,6 +12,7 @@ import type {
   EngineRawState,
   MakeDraftPickInput,
   NegotiateContractInput,
+  PlayerDetail,
   PlayerSummary,
   ReleasePlayerInput,
   SetLineupInput,
@@ -19,6 +20,12 @@ import type {
   TradeEvaluation,
   TradeProposal,
 } from "../../domain/types.js";
+
+export const BASKETBALL_GM_ENGINE_METADATA: EngineMetadata = {
+  name: "basketball-gm",
+  version: "5.1.0",
+  commit: "4ee432c5b9097ed978749a049fff5823711690dc",
+};
 
 /**
  * Main-thread implementation of SimulationEngine backed by the real
@@ -33,11 +40,7 @@ import type {
  * SimulationEngine method as a `host.call(method, params)`.
  */
 export class BasketballGmEngine implements SimulationEngine {
-  readonly metadata: EngineMetadata = {
-    name: "basketball-gm",
-    version: "5.1.0",
-    commit: "4ee432c5b9097ed978749a049fff5823711690dc",
-  };
+  readonly metadata: EngineMetadata = BASKETBALL_GM_ENGINE_METADATA;
 
   private readonly host: EpisodeWorkerHost;
 
@@ -50,9 +53,17 @@ export class BasketballGmEngine implements SimulationEngine {
       options?.sourceDir ??
       process.env["BBGM_SOURCE_DIR"] ??
       resolve(".cache/zengm");
+    const resourceLimits = parseLimit(
+      process.env["BBGM_ENGINE_MAX_OLD_GEN_MB"],
+    );
+    const callTimeoutMs = parseTimeout(process.env["BBGM_ENGINE_TIMEOUT_MS"]);
     this.host = new EpisodeWorkerHost({
       workerScript: bridgePath,
       workerData: { sourceDir: resolve(sourceDir) },
+      ...(callTimeoutMs === undefined ? {} : { callTimeoutMs }),
+      ...(resourceLimits === undefined
+        ? {}
+        : { resourceLimits: { maxOldGenerationSizeMb: resourceLimits } }),
     });
   }
 
@@ -66,6 +77,10 @@ export class BasketballGmEngine implements SimulationEngine {
 
   async getTeamRoster(tid: number): Promise<PlayerSummary[]> {
     return this.call<PlayerSummary[]>("getTeamRoster", { tid });
+  }
+
+  async getPlayer(pid: number): Promise<PlayerDetail> {
+    return this.call<PlayerDetail>("getPlayer", { pid });
   }
 
   async getOptions(): Promise<EngineOption[]> {
@@ -126,3 +141,17 @@ export class BasketballGmEngine implements SimulationEngine {
     return this.host.call<T>(method, params);
   }
 }
+
+const parsePositiveInteger = (
+  value: string | undefined,
+): number | undefined => {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+const parseTimeout = (value: string | undefined): number | undefined =>
+  parsePositiveInteger(value);
+
+const parseLimit = (value: string | undefined): number | undefined =>
+  parsePositiveInteger(value);

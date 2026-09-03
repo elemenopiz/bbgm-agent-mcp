@@ -8,6 +8,7 @@ import type {
 import type { MetricComponents } from "./objectives.js";
 import type { ScenarioManifest } from "./scenario.js";
 import type { TrajectorySummary } from "./trajectory.js";
+import type { PolicyTelemetry } from "./evaluate.js";
 
 const playerValue = (player: PlayerSummary): number =>
   player.overall * 2 + player.potential;
@@ -22,6 +23,10 @@ export type MetricInput = {
   finalConstraints: ConstraintStatus[];
   terminalMetrics: TerminalMetrics;
   trajectory: TrajectorySummary;
+  /** Number of policy decision turns, including read-only model actions. */
+  policyStepsTaken?: number;
+  /** Model/parser/provider telemetry not represented by DomainService logs. */
+  policyTelemetry?: PolicyTelemetry;
 };
 
 /**
@@ -40,8 +45,18 @@ export const computeMetricComponents = (
     terminalMetrics,
     trajectory,
     scenario,
+    policyStepsTaken,
+    policyTelemetry,
   } = input;
-  const gamesPlayed = finalState.userTeam.won + finalState.userTeam.lost;
+  const modelCallCount = policyTelemetry?.modelCallCount ?? 0;
+  const modelParseErrorCount = policyTelemetry?.parseErrorCount ?? 0;
+  const modelProviderErrorCount = policyTelemetry?.providerErrorCount ?? 0;
+  const modelErrorCount = policyTelemetry?.modelErrorCount ?? 0;
+  const modelToolErrorCount = policyTelemetry?.toolErrorCount ?? 0;
+  const modelInvalidActionCount = modelParseErrorCount + modelToolErrorCount;
+  const actionDenominator = trajectory.agentAttemptCount + modelParseErrorCount;
+  const gamesPlayed =
+    terminalMetrics.finalRecord.won + terminalMetrics.finalRecord.lost;
   const rosterAgeAvg =
     fullRoster.length === 0
       ? 0
@@ -70,7 +85,8 @@ export const computeMetricComponents = (
         finalConstraints.length;
 
   return {
-    win_pct: gamesPlayed === 0 ? 0 : finalState.userTeam.won / gamesPlayed,
+    win_pct:
+      gamesPlayed === 0 ? 0 : terminalMetrics.finalRecord.won / gamesPlayed,
     games_played: gamesPlayed,
     seasons_completed: terminalMetrics.seasonsCompleted,
     hard_constraint_violations: terminalMetrics.hardConstraintViolations,
@@ -84,13 +100,41 @@ export const computeMetricComponents = (
     total_asset_value: currentPlayerValue + draftCapitalValue,
     cap_space: finalState.userTeam.capSpace,
     invalid_action_rate:
-      trajectory.mutationSteps === 0
+      actionDenominator === 0
         ? 0
-        : trajectory.invalidActionCount / trajectory.mutationSteps,
+        : (trajectory.rejectedAttemptCount + modelParseErrorCount) /
+          actionDenominator,
+    model_call_count: modelCallCount,
+    model_parse_error_count: modelParseErrorCount,
+    model_provider_error_count: modelProviderErrorCount,
+    model_error_count: modelErrorCount,
+    model_tool_error_count: modelToolErrorCount,
+    model_invalid_action_rate:
+      modelCallCount === 0 ? 0 : modelInvalidActionCount / modelCallCount,
+    stale_action_rate:
+      trajectory.agentAttemptCount === 0
+        ? 0
+        : trajectory.staleActionCount / trajectory.agentAttemptCount,
     tool_call_efficiency:
       trajectory.totalSteps === 0
         ? 0
         : trajectory.mutationSteps / trajectory.totalSteps,
-    steps_used_ratio: trajectory.totalSteps / scenario.maxSteps,
+    decision_efficiency:
+      trajectory.agentAttemptCount === 0
+        ? 0
+        : terminalMetrics.seasonsCompleted / trajectory.agentAttemptCount,
+    agent_attempts_per_completed_season:
+      terminalMetrics.seasonsCompleted === 0
+        ? 0
+        : trajectory.agentAttemptCount / terminalMetrics.seasonsCompleted,
+    // The domain budget is consumed by action attempts, including rejected
+    // mutations. Accepted trajectory records alone undercount the budget when
+    // a policy retries an invalid action against the real engine.
+    // `maxSteps` is also the evaluator's one-action-per-turn budget. Reads
+    // used while constructing an observation are deliberately absent from
+    // agentAttemptCount, so this metric must use the evaluator's turn count
+    // rather than the audit-log tool count. This keeps the ratio bounded by 1.
+    steps_used_ratio:
+      (policyStepsTaken ?? trajectory.agentAttemptCount) / scenario.maxSteps,
   };
 };

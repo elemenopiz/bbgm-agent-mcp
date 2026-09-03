@@ -32,6 +32,7 @@ export const registerEndEpisode = (
       try {
         return success(
           await domain.endEpisode(episodeId, { exportFinalSnapshot }),
+          endEpisodeResultSchema,
         );
       } catch (error) {
         return failure(error);

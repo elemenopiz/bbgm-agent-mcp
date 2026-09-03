@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { DomainService } from "../../src/domain/DomainService.js";
-import type { FinancesView, RosterView } from "../../src/domain/types.js";
+import type {
+  FinancesView,
+  OverviewView,
+  RosterView,
+  TradeProposal,
+} from "../../src/domain/types.js";
 import { BasketballGmEngine } from "../../src/engine/bbgm/BasketballGmEngine.js";
 import { createFileSnapshotStore } from "../../src/persistence/snapshots.js";
 import { EpisodeManager } from "../../src/sessions/EpisodeManager.js";
@@ -117,10 +122,107 @@ describe.skipIf(!runRealEngine)("BasketballGmEngine (real engine)", () => {
       });
       expect(restoredState.revision).toBe(restored.revision);
 
+      // The checkpoint includes the worker PRNG state, not just IndexedDB.
+      // Repeating the same post-checkpoint action after a second restore must
+      // therefore produce the same engine state (revision/hash are expected
+      // to differ because restore and advance are audited mutations).
+      const firstContinuation = await domain.advance(
+        overview.episodeId,
+        { target: "next_game" },
+        {
+          expectedRevision: restored.revision,
+          idempotencyKey: "real-engine-continuation-0001",
+        },
+      );
+      const firstContinuationState = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "overview",
+      });
+      const restoredAgain = await domain.restoreCheckpoint(
+        overview.episodeId,
+        checkpoint.checkpointId,
+        {
+          expectedRevision: firstContinuation.revision,
+          idempotencyKey: "real-engine-restore-0002",
+        },
+      );
+      await domain.advance(
+        overview.episodeId,
+        { target: "next_game" },
+        {
+          expectedRevision: restoredAgain.revision,
+          idempotencyKey: "real-engine-continuation-0002",
+        },
+      );
+      const secondContinuationState = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "overview",
+      });
+      const comparable = (
+        state: OverviewView,
+      ): Omit<OverviewView, "episodeId" | "revision" | "stateHash"> => {
+        const {
+          episodeId: _episodeId,
+          revision: _revision,
+          stateHash: _stateHash,
+          ...rest
+        } = state;
+        return rest;
+      };
+      expect(comparable(firstContinuationState as OverviewView)).toEqual(
+        comparable(secondContinuationState as OverviewView),
+      );
+
       const ended = await domain.endEpisode(overview.episodeId, {
         exportFinalSnapshot: false,
       });
       expect(ended.finalState.status).toBe("ended");
+    },
+  );
+
+  test(
+    "resumes a persisted real-engine snapshot in a fresh worker",
+    { timeout: 180_000 },
+    async () => {
+      const dataRoot = await mkdtemp(
+        join(tmpdir(), "bbgm-real-engine-resume-test-"),
+      );
+      dataRoots.push(dataRoot);
+      const snapshots = createFileSnapshotStore(dataRoot);
+      const firstManager = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const firstDomain = new DomainService(firstManager, snapshots);
+      domains.push(firstDomain);
+
+      const created = await firstDomain.createEpisode({
+        scenarioId: "real-engine-resume-test",
+        seed: "real-engine-resume-seed",
+        userTeamId: 0,
+        startingSeason: new Date().getFullYear(),
+      });
+      const advanced = await firstDomain.advance(
+        created.episodeId,
+        { target: "next_game" },
+        {
+          expectedRevision: created.revision,
+          idempotencyKey: "real-resume-01",
+        },
+      );
+      await firstDomain.closeAll();
+
+      const secondManager = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const secondDomain = new DomainService(secondManager, snapshots);
+      domains.push(secondDomain);
+
+      const resumed = await secondDomain.resumeEpisode(created.episodeId);
+      expect(resumed.revision).toBe(advanced.revision);
+      expect(resumed.stateHash).toBe(advanced.stateHash);
+      expect(resumed.status).toBe("active");
     },
   );
 
@@ -142,7 +244,7 @@ describe.skipIf(!runRealEngine)("BasketballGmEngine (real engine)", () => {
       );
       domains.push(domain);
 
-      let overview = await domain.createEpisode({
+      const overview = await domain.createEpisode({
         scenarioId: "real-engine-full-coverage-test",
         seed: "real-engine-full-coverage-seed",
         userTeamId: 0,
@@ -307,58 +409,406 @@ describe.skipIf(!runRealEngine)("BasketballGmEngine (real engine)", () => {
         "expected at least one candidate trade partner to accept a free player",
       ).toBe(true);
 
-      // -- advance until it's genuinely the user's turn to pick. Being in the "draft" phase is necessary but
-      // not sufficient -- other teams may still have picks ahead of the user's in draft order, so this
-      // checks the advance_complete stop reason (blocked_pending_decision), not just the phase name.
-      let phaseSteps = 0;
-      let blockedOnDraftPick = false;
-      while (!blockedOnDraftPick && phaseSteps < 20) {
+      const ended = await domain.endEpisode(overview.episodeId, {
+        exportFinalSnapshot: false,
+      });
+      expect(ended.terminalMetrics.transactionCount).toBeGreaterThanOrEqual(4); // release, sign, contract_extension, trade
+    },
+  );
+
+  test(
+    "makes a real draft pick after advancing a fresh league to the user decision",
+    { timeout: 180_000 },
+    async () => {
+      const dataRoot = await mkdtemp(
+        join(tmpdir(), "bbgm-real-engine-draft-test-"),
+      );
+      dataRoots.push(dataRoot);
+      const episodes = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const domain = new DomainService(
+        episodes,
+        createFileSnapshotStore(dataRoot),
+      );
+      domains.push(domain);
+
+      let overview = await domain.createEpisode({
+        scenarioId: "real-engine-draft-test",
+        seed: "real-engine-draft-seed",
+        userTeamId: 0,
+        startingSeason: new Date().getFullYear(),
+        scenarioPolicy: {
+          allowedAdvanceTargets: [
+            "until_regular_season",
+            "until_trade_deadline",
+            "until_playoffs",
+            "through_playoffs",
+            "until_draft",
+            "until_next_pick",
+          ],
+        },
+      });
+      let revision = overview.revision;
+      const milestones = [
+        "until_regular_season",
+        "until_trade_deadline",
+        "until_playoffs",
+        "through_playoffs",
+        "until_draft",
+        "until_next_pick",
+      ] as const;
+      for (const target of milestones) {
         const result = await domain.advance(
           overview.episodeId,
-          { target: "phase" },
+          { target },
           {
             expectedRevision: revision,
-            idempotencyKey: nextKey(`phase-${phaseSteps}`),
+            idempotencyKey: `real-draft-${target}`,
           },
         );
         revision = result.revision;
-        phaseSteps += 1;
-        blockedOnDraftPick = result.events.some(
-          (e) =>
-            e.type === "advance_complete" &&
-            e["reason"] === "blocked_pending_decision",
-        );
         overview = (await domain.getState({
           episodeId: overview.episodeId,
           view: "overview",
-        })) as typeof overview;
+        })) as OverviewView;
       }
-      expect(blockedOnDraftPick).toBe(true);
       expect(overview.phase).toBe("draft");
 
-      // -- makeDraftPick --
       const draft = await domain.getState({
         episodeId: overview.episodeId,
         view: "draft",
       });
       if (draft.view !== "draft") throw new Error("expected draft view");
       const prospect = draft.prospects[0];
-      if (!prospect)
-        throw new Error(
-          "expected at least one available prospect at the draft",
-        );
+      if (!prospect) throw new Error("expected a draft prospect");
       const draftResult = await domain.makeDraftPick(
         overview.episodeId,
         { pid: prospect.pid },
-        { expectedRevision: revision, idempotencyKey: nextKey("draft") },
+        {
+          expectedRevision: revision,
+          idempotencyKey: "real-draft-pick-0001",
+        },
       );
-      revision = draftResult.revision;
-      expect(draftResult.events.some((e) => e.type === "draft")).toBe(true);
-
+      expect(draftResult.events.some((event) => event.type === "draft")).toBe(
+        true,
+      );
       const ended = await domain.endEpisode(overview.episodeId, {
         exportFinalSnapshot: false,
       });
-      expect(ended.terminalMetrics.transactionCount).toBeGreaterThanOrEqual(4); // release, sign, contract_extension, trade, draft
+      expect(ended.terminalMetrics.transactionCount).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  test(
+    "cross-checks a legal trade declined by the real opponent and preserves state",
+    { timeout: 240_000 },
+    async () => {
+      const dataRoot = await mkdtemp(
+        join(tmpdir(), "bbgm-real-engine-declined-trade-test-"),
+      );
+      dataRoots.push(dataRoot);
+      const episodes = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const domain = new DomainService(
+        episodes,
+        createFileSnapshotStore(dataRoot),
+      );
+      domains.push(domain);
+
+      const overview = await domain.createEpisode({
+        scenarioId: "real-engine-declined-trade-test",
+        seed: "real-engine-declined-trade-seed",
+        userTeamId: 0,
+        startingSeason: new Date().getFullYear(),
+      });
+      const ownRoster = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "roster",
+      });
+      if (ownRoster.view !== "roster") throw new Error("expected roster view");
+
+      // Search a bounded, deterministic set of deliberately bad offers. The
+      // salary-compatible pair is not known in advance because the real
+      // league's generated contracts vary by seed, while the opponent's
+      // ValueChangeCalculator should consistently reject a low-value player
+      // for a high-value player when the trade is otherwise legal.
+      const offeredCandidates = [...ownRoster.players]
+        .sort((a, b) => a.overall - b.overall)
+        .slice(0, 8);
+      let declined:
+        | {
+            proposal: TradeProposal;
+            evaluation: Awaited<ReturnType<DomainService["evaluateTrade"]>>;
+          }
+        | undefined;
+
+      for (let offset = 1; offset < 8 && declined === undefined; offset += 1) {
+        const otherTeamId = (overview.userTeam.tid + offset) % 30;
+        const otherRoster = await domain.getState({
+          episodeId: overview.episodeId,
+          view: "roster",
+          teamId: otherTeamId,
+        });
+        if (otherRoster.view !== "roster")
+          throw new Error("expected roster view");
+        const requestedCandidates = [...otherRoster.players]
+          .sort((a, b) => b.overall - a.overall)
+          .slice(0, 8);
+
+        for (const offered of offeredCandidates) {
+          for (const requested of requestedCandidates) {
+            const proposal = {
+              otherTeamId,
+              offered: [{ type: "player" as const, pid: offered.pid }],
+              requested: [{ type: "player" as const, pid: requested.pid }],
+            };
+            const evaluation = await domain.evaluateTrade(
+              overview.episodeId,
+              proposal,
+            );
+            if (evaluation.legal && evaluation.acceptedByOtherTeam === false) {
+              declined = { proposal, evaluation };
+              break;
+            }
+          }
+          if (declined !== undefined) break;
+        }
+      }
+
+      if (declined === undefined) {
+        throw new Error(
+          "The pinned real engine exposed no legal trade that its opponent declined within the bounded candidate set",
+        );
+      }
+      expect(declined.evaluation.legal).toBe(true);
+      expect(declined.evaluation.acceptedByOtherTeam).toBe(false);
+      expect(declined.evaluation.reasons.join(" ")).toMatch(
+        /would not accept|not accept/i,
+      );
+
+      const before = (await domain.getState({
+        episodeId: overview.episodeId,
+        view: "overview",
+      })) as OverviewView;
+      await expect(
+        domain.executeTrade(overview.episodeId, declined.proposal, {
+          expectedRevision: before.revision,
+          idempotencyKey: "real-engine-declined-trade-0001",
+        }),
+      ).rejects.toThrow(/not executable|rejected/i);
+
+      const after = (await domain.getState({
+        episodeId: overview.episodeId,
+        view: "overview",
+      })) as OverviewView;
+      expect(after.revision).toBe(before.revision);
+      expect(after.stateHash).toBe(before.stateHash);
+      expect(after.rosterCount).toBe(before.rosterCount);
+      expect(after.status).toBe("active");
+    },
+  );
+
+  test(
+    "isolates mixed concurrent mutations across two real episode workers",
+    { timeout: 240_000 },
+    async () => {
+      const dataRoot = await mkdtemp(
+        join(tmpdir(), "bbgm-real-engine-concurrent-mutations-test-"),
+      );
+      dataRoots.push(dataRoot);
+      const episodes = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const domain = new DomainService(
+        episodes,
+        createFileSnapshotStore(dataRoot),
+      );
+      domains.push(domain);
+
+      const [episodeA, episodeB] = await Promise.all([
+        domain.createEpisode({
+          scenarioId: "real-engine-concurrent-mutations-a",
+          seed: "real-engine-concurrent-mutations-seed-a",
+          userTeamId: 0,
+          startingSeason: new Date().getFullYear(),
+        }),
+        domain.createEpisode({
+          scenarioId: "real-engine-concurrent-mutations-b",
+          seed: "real-engine-concurrent-mutations-seed-b",
+          userTeamId: 0,
+          startingSeason: new Date().getFullYear(),
+        }),
+      ]);
+      const [rosterA, rosterB, freeAgentsA, freeAgentsB] = await Promise.all([
+        domain.getState({ episodeId: episodeA.episodeId, view: "roster" }),
+        domain.getState({ episodeId: episodeB.episodeId, view: "roster" }),
+        domain.getState({
+          episodeId: episodeA.episodeId,
+          view: "free_agents",
+          limit: 1,
+        }),
+        domain.getState({
+          episodeId: episodeB.episodeId,
+          view: "free_agents",
+          limit: 1,
+        }),
+      ]);
+      if (
+        rosterA.view !== "roster" ||
+        rosterB.view !== "roster" ||
+        freeAgentsA.view !== "free_agents" ||
+        freeAgentsB.view !== "free_agents"
+      ) {
+        throw new Error("expected roster and free-agent views");
+      }
+      const releaseA = rosterA.players[0];
+      const releaseB = rosterB.players[0];
+      const freeAgentA = freeAgentsA.players[0];
+      const freeAgentB = freeAgentsB.players[0];
+      const negotiateA = rosterA.players.find(
+        (player) => player.pid !== releaseA?.pid,
+      );
+      if (!releaseA || !releaseB || !freeAgentA || !freeAgentB || !negotiateA) {
+        throw new Error("expected real league roster and free-agent entries");
+      }
+
+      // Different mutation types run at the same time, but each episode's
+      // own queue must still apply them in a valid revision order.
+      const [lineupA, releaseResultB] = await Promise.all([
+        domain.setLineup(
+          episodeA.episodeId,
+          { order: [...rosterA.players].reverse().map((player) => player.pid) },
+          { expectedRevision: 0, idempotencyKey: "real-mixed-a-lineup-0001" },
+        ),
+        domain.releasePlayer(
+          episodeB.episodeId,
+          { pid: releaseB.pid },
+          { expectedRevision: 0, idempotencyKey: "real-mixed-b-release-0001" },
+        ),
+      ]);
+      const [releaseResultA, signResultB] = await Promise.all([
+        domain.releasePlayer(
+          episodeA.episodeId,
+          { pid: releaseA.pid },
+          {
+            expectedRevision: lineupA.revision,
+            idempotencyKey: "real-mixed-a-release-0001",
+          },
+        ),
+        domain.signFreeAgent(
+          episodeB.episodeId,
+          { pid: freeAgentB.pid, amount: 1.2, years: 2 },
+          {
+            expectedRevision: releaseResultB.revision,
+            idempotencyKey: "real-mixed-b-sign-0001",
+          },
+        ),
+      ]);
+      const [negotiateResultA, advanceResultB] = await Promise.all([
+        domain.negotiateContract(
+          episodeA.episodeId,
+          {
+            pid: negotiateA.pid,
+            amount: Math.max(1, Math.min(negotiateA.contractAmount + 1, 20)),
+            years: 3,
+          },
+          {
+            expectedRevision: releaseResultA.revision,
+            idempotencyKey: "real-mixed-a-negotiate-0001",
+          },
+        ),
+        domain.advance(
+          episodeB.episodeId,
+          { target: "next_game" },
+          {
+            expectedRevision: signResultB.revision,
+            idempotencyKey: "real-mixed-b-advance-0001",
+          },
+        ),
+      ]);
+
+      expect(negotiateResultA.revision).toBe(3);
+      expect(advanceResultB.revision).toBe(3);
+      expect(
+        negotiateResultA.events.some(
+          (event) => event.type === "contract_extension",
+        ),
+      ).toBe(true);
+      expect(
+        advanceResultB.events.some(
+          (event) => event.type === "advance_complete",
+        ),
+      ).toBe(true);
+
+      const [finalA, finalB] = (await Promise.all([
+        domain.getState({ episodeId: episodeA.episodeId, view: "overview" }),
+        domain.getState({ episodeId: episodeB.episodeId, view: "overview" }),
+      ])) as [OverviewView, OverviewView];
+      expect(finalA.episodeId).toBe(episodeA.episodeId);
+      expect(finalB.episodeId).toBe(episodeB.episodeId);
+      expect(finalA.revision).toBe(3);
+      expect(finalB.revision).toBe(3);
+      expect(finalA.rosterCount).toBe(episodeA.rosterCount - 1);
+      expect(finalB.rosterCount).toBe(episodeB.rosterCount);
+
+      const [finalRosterA, finalRosterB] = await Promise.all([
+        domain.getState({ episodeId: episodeA.episodeId, view: "roster" }),
+        domain.getState({ episodeId: episodeB.episodeId, view: "roster" }),
+      ]);
+      if (finalRosterA.view !== "roster" || finalRosterB.view !== "roster")
+        throw new Error("expected final roster views");
+      expect(
+        finalRosterA.players.some((player) => player.pid === releaseA.pid),
+      ).toBe(false);
+      expect(
+        finalRosterB.players.some((player) => player.pid === releaseB.pid),
+      ).toBe(false);
+      expect(
+        finalRosterB.players.some((player) => player.pid === freeAgentB.pid),
+      ).toBe(true);
+      expect(
+        finalRosterA.players.some((player) => player.pid === negotiateA.pid),
+      ).toBe(true);
+      expect(finalA.stateHash).not.toBe(finalB.stateHash);
+    },
+  );
+
+  test(
+    "rejects an unsupported custom league configuration before starting a real worker",
+    { timeout: 30_000 },
+    async () => {
+      const dataRoot = await mkdtemp(
+        join(tmpdir(), "bbgm-real-engine-custom-config-test-"),
+      );
+      dataRoots.push(dataRoot);
+      const episodes = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const domain = new DomainService(
+        episodes,
+        createFileSnapshotStore(dataRoot),
+      );
+      domains.push(domain);
+
+      await expect(
+        domain.createEpisode({
+          scenarioId: "real-engine-unsupported-custom-config-test",
+          seed: "real-engine-unsupported-custom-config-seed",
+          userTeamId: 0,
+          startingSeason: new Date().getFullYear(),
+          // CreateEpisodeInput intentionally has no custom league-config
+          // surface. Strict validation must reject this instead of silently
+          // creating a default league while claiming the requested config.
+          leagueConfig: { draftRounds: 3 },
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(await episodes.listPersisted()).toHaveLength(0);
     },
   );
 
@@ -366,11 +816,7 @@ describe.skipIf(!runRealEngine)("BasketballGmEngine (real engine)", () => {
     "the same seed and action sequence produces identical state hashes across two concurrent real episodes",
     { timeout: 180_000 },
     async () => {
-      const dataRoot = await mkdtemp(
-        join(tmpdir(), "bbgm-real-engine-det-test-"),
-      );
-      dataRoots.push(dataRoot);
-      const runOnce = async (): Promise<string[]> => {
+      const runOnce = async (dataRoot: string): Promise<string[]> => {
         const episodes = new EpisodeManager(
           () => new BasketballGmEngine(),
           dataRoot,
@@ -379,28 +825,39 @@ describe.skipIf(!runRealEngine)("BasketballGmEngine (real engine)", () => {
           episodes,
           createFileSnapshotStore(dataRoot),
         );
-        domains.push(domain);
-        const hashes: string[] = [];
-        const overview = await domain.createEpisode({
-          scenarioId: "real-engine-determinism-test",
-          seed: "real-engine-determinism-seed",
-          userTeamId: 0,
-          startingSeason: new Date().getFullYear(),
-        });
-        hashes.push(overview.stateHash);
-        const result = await domain.advance(
-          overview.episodeId,
-          { target: "next_game" },
-          {
-            expectedRevision: overview.revision,
-            idempotencyKey: "real-engine-det-0001",
-          },
-        );
-        hashes.push(result.stateHash);
-        return hashes;
+        try {
+          const hashes: string[] = [];
+          const overview = await domain.createEpisode({
+            scenarioId: "real-engine-determinism-test",
+            seed: "real-engine-determinism-seed",
+            userTeamId: 0,
+            startingSeason: new Date().getFullYear(),
+          });
+          hashes.push(overview.stateHash);
+          const result = await domain.advance(
+            overview.episodeId,
+            { target: "next_game" },
+            {
+              expectedRevision: overview.revision,
+              idempotencyKey: "real-engine-det-0001",
+            },
+          );
+          hashes.push(result.stateHash);
+          return hashes;
+        } finally {
+          await domain.closeAll();
+        }
       };
 
-      const [a, b] = await Promise.all([runOnce(), runOnce()]);
+      const [dataRootA, dataRootB] = await Promise.all([
+        mkdtemp(join(tmpdir(), "bbgm-real-engine-det-test-a-")),
+        mkdtemp(join(tmpdir(), "bbgm-real-engine-det-test-b-")),
+      ]);
+      dataRoots.push(dataRootA, dataRootB);
+      const [a, b] = await Promise.all([
+        runOnce(dataRootA),
+        runOnce(dataRootB),
+      ]);
       expect(a).toEqual(b);
     },
   );
