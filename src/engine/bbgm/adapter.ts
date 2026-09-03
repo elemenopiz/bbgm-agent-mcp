@@ -1,5 +1,6 @@
 import type {
   AdvanceInput,
+  AdvertiseOnTradingBlockInput,
   CreateEpisodeInput,
   EngineEvent,
   EmploymentStatus,
@@ -20,7 +21,11 @@ import type {
   SignFreeAgentInput,
   TradeAsset,
   TradeEvaluation,
+  TradeOffer,
+  TradeOfferAsset,
   TradeProposal,
+  TradeProposalsData,
+  TradingBlockData,
 } from "../../domain/types.js";
 
 import {
@@ -112,6 +117,20 @@ export type ZengmModules = {
      * player -- this is what bbgm_get_player maps from. See getPlayer()
      * below. */
     player?: (inputs: { pid: number }) => Promise<unknown>;
+    /** zengm's trading-block worker view (src/worker/views/tradingBlock.ts).
+     * Called with no pids/dpids so it reads back whatever is currently saved
+     * (savedTradingBlock) rather than previewing a candidate advertisement --
+     * this is what bbgm_get_state(view="trading_block") maps from. See
+     * getTradingBlock() below. */
+    tradingBlock?: (inputs: {
+      pids?: number[];
+      dpids?: number[];
+    }) => Promise<unknown>;
+    /** zengm's trade-proposals worker view (src/worker/views/tradeProposals.ts).
+     * Returns up to 5 AI-initiated offers the user did not solicit -- this is
+     * what bbgm_get_state(view="trade_proposals") maps from. See
+     * getTradeProposals() below. */
+    tradeProposals?: (inputs?: unknown) => Promise<unknown>;
   };
   core: {
     player: {
@@ -243,6 +262,20 @@ export type ZengmModules = {
         forceTrade: boolean,
         conditions: ZengmConditions,
       ) => Promise<{ accepted: boolean; message: string | null }>;
+      /** Computes AI counter-offers for a candidate trading-block
+       * advertisement AND persists it as the user's saved trading block
+       * (idb.cache.savedTradingBlock) -- the same function the real UI's
+       * "Ask For Trade Proposals" button calls (api/index.ts's
+       * getTradingBlockOffers). `lookingFor` is zengm's optional
+       * position/skill/asset preference filter; an all-false/empty value
+       * (this adapter's default) matches upstream's own "no preference"
+       * initial state and applies no filtering. See
+       * advertiseOnTradingBlock() below. */
+      getTradingBlockOffers: (params: {
+        pids: number[];
+        dpids: number[];
+        lookingFor: unknown;
+      }) => Promise<unknown[]>;
     };
   };
   constants: {
@@ -397,6 +430,171 @@ const leagueMetadataFromSnapshot = (
   return metadata;
 };
 
+// ---------------------------------------------------------------------------
+// Trading block / trade proposals mapping. Sourced from zengm's own
+// tradingBlock/tradeProposals worker views (view-shaped playersPlus /
+// draftPicks-with-desc / augmented-offer objects), not raw IndexedDB rows --
+// see docs/INFORMATION_AUDIT.md and getTradingBlock()/getTradeProposals()
+// below. Maps defensively: every field optional, unknown shapes degrade to
+// `undefined`/an empty list rather than throwing. Deliberately excludes
+// zengm's internal `value` composite valuation, same as getPlayer() above.
+// ---------------------------------------------------------------------------
+
+/** A single view-shaped player (playersPlus output: attrs pid/firstName/
+ * lastName/age/contract/untradable, ratings ovr/pot/skills/pos). Contract
+ * amounts here are already millions -- playersPlus converts them, unlike
+ * rosterEnrichment's raw mood.contractAmount; see getPlayer()'s doc comment. */
+function mapViewPlayerToOfferAsset(raw: unknown): TradeOfferAsset | undefined {
+  if (!isRecord(raw) || typeof raw["pid"] !== "number") return undefined;
+  const ratings = isRecord(raw["ratings"]) ? raw["ratings"] : undefined;
+  const contract = isRecord(raw["contract"]) ? raw["contract"] : undefined;
+  const asset: Extract<TradeOfferAsset, { type: "player" }> = {
+    type: "player",
+    pid: raw["pid"],
+  };
+  if (
+    typeof raw["firstName"] === "string" &&
+    typeof raw["lastName"] === "string"
+  )
+    asset.name = `${raw["firstName"]} ${raw["lastName"]}`;
+  if (typeof raw["age"] === "number") asset.age = raw["age"];
+  if (typeof ratings?.["pos"] === "string") asset.position = ratings["pos"];
+  if (typeof ratings?.["ovr"] === "number") asset.overall = ratings["ovr"];
+  if (typeof ratings?.["pot"] === "number") asset.potential = ratings["pot"];
+  if (typeof contract?.["amount"] === "number")
+    asset.contractAmount = contract["amount"];
+  if (typeof contract?.["exp"] === "number")
+    asset.contractExpires = contract["exp"];
+  if (Array.isArray(ratings?.["skills"]))
+    asset.skills = ratings["skills"].filter(
+      (skill): skill is string => typeof skill === "string",
+    );
+  if (typeof raw["untradable"] === "boolean")
+    asset.untradable = raw["untradable"];
+  return asset;
+}
+
+/** A single view-shaped draft pick (zengm's raw pick fields plus a
+ * human-readable `desc` added by helpers.pickDesc). */
+function mapViewPickToOfferAsset(raw: unknown): TradeOfferAsset | undefined {
+  if (!isRecord(raw) || typeof raw["dpid"] !== "number") return undefined;
+  const asset: Extract<TradeOfferAsset, { type: "draft_pick" }> = {
+    type: "draft_pick",
+    dpid: raw["dpid"],
+  };
+  if (typeof raw["season"] === "number") asset.season = raw["season"];
+  if (typeof raw["round"] === "number") asset.round = raw["round"];
+  if (typeof raw["desc"] === "string") asset.description = raw["desc"];
+  return asset;
+}
+
+const finitePayrollThousands = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value / 1000
+    : undefined;
+
+/**
+ * One augmented offer object shared by tradingBlock's savedTradingBlock.offers
+ * and tradeProposals' offers (api/index.ts's augmentOffers): {tid, strategy,
+ * won, lost, payroll, pids, dpids, pidsUser, dpidsUser, players, picks,
+ * playersUser, picksUser, willing?}. Oriented like TradeProposal: `players`/
+ * `picks` (the other team's side) become `requested`; `playersUser`/
+ * `picksUser` (the user's side) become `offered` -- see TradeOffer's doc
+ * comment.
+ */
+function mapRawTradeOffer(raw: unknown): TradeOffer | undefined {
+  if (!isRecord(raw) || typeof raw["tid"] !== "number") return undefined;
+  const offer: TradeOffer = {
+    otherTeamId: raw["tid"],
+    offered: [],
+    requested: [],
+  };
+  if (typeof raw["strategy"] === "string") offer.strategy = raw["strategy"];
+  if (typeof raw["won"] === "number") offer.won = raw["won"];
+  if (typeof raw["lost"] === "number") offer.lost = raw["lost"];
+  const payroll = finitePayrollThousands(raw["payroll"]);
+  if (payroll !== undefined) offer.payroll = payroll;
+  if (typeof raw["willing"] === "boolean") offer.willing = raw["willing"];
+
+  const requestedPlayers = Array.isArray(raw["players"]) ? raw["players"] : [];
+  const requestedPicks = Array.isArray(raw["picks"]) ? raw["picks"] : [];
+  const offeredPlayers = Array.isArray(raw["playersUser"])
+    ? raw["playersUser"]
+    : [];
+  const offeredPicks = Array.isArray(raw["picksUser"]) ? raw["picksUser"] : [];
+
+  offer.requested = [
+    ...requestedPlayers.map(mapViewPlayerToOfferAsset),
+    ...requestedPicks.map(mapViewPickToOfferAsset),
+  ].filter((asset): asset is TradeOfferAsset => asset !== undefined);
+  offer.offered = [
+    ...offeredPlayers.map(mapViewPlayerToOfferAsset),
+    ...offeredPicks.map(mapViewPickToOfferAsset),
+  ].filter((asset): asset is TradeOfferAsset => asset !== undefined);
+
+  return offer;
+}
+
+const rawTid = (raw: unknown): number =>
+  isRecord(raw) && typeof raw["tid"] === "number" ? raw["tid"] : 0;
+
+/** Deterministic ordering: sort raw offers by team ID ascending before
+ * mapping, rather than trusting the engine's own (seed-shuffled) team
+ * iteration order -- see docs/INFORMATION_AUDIT.md's reproducibility note. */
+function mapAndSortOffers(rawOffers: unknown[]): TradeOffer[] {
+  return [...rawOffers]
+    .sort((a, b) => rawTid(a) - rawTid(b))
+    .map(mapRawTradeOffer)
+    .filter((offer): offer is TradeOffer => offer !== undefined);
+}
+
+const rawPlayerOverall = (raw: unknown): number =>
+  isRecord(raw) &&
+  isRecord(raw["ratings"]) &&
+  typeof raw["ratings"]["ovr"] === "number"
+    ? raw["ratings"]["ovr"]
+    : 0;
+
+function mapAndSortTradableRoster(rawPlayers: unknown[]): TradeOfferAsset[] {
+  return [...rawPlayers]
+    .sort((a, b) => rawPlayerOverall(b) - rawPlayerOverall(a))
+    .map(mapViewPlayerToOfferAsset)
+    .filter((asset): asset is TradeOfferAsset => asset !== undefined);
+}
+
+const rawPickSortKey = (raw: unknown): [number, number, number] =>
+  isRecord(raw)
+    ? [
+        typeof raw["season"] === "number" ? raw["season"] : 0,
+        typeof raw["round"] === "number" ? raw["round"] : 0,
+        typeof raw["dpid"] === "number" ? raw["dpid"] : 0,
+      ]
+    : [0, 0, 0];
+
+function mapAndSortTradablePicks(rawPicks: unknown[]): TradeOfferAsset[] {
+  return [...rawPicks]
+    .sort((a, b) => {
+      const [seasonA, roundA, dpidA] = rawPickSortKey(a);
+      const [seasonB, roundB, dpidB] = rawPickSortKey(b);
+      return seasonA - seasonB || roundA - roundB || dpidA - dpidB;
+    })
+    .map(mapViewPickToOfferAsset)
+    .filter((asset): asset is TradeOfferAsset => asset !== undefined);
+}
+
+/** Neutral "no preference" filter for api.main.getTradingBlockOffers,
+ * matching upstream's own useLookingForState() initial state (every
+ * position/skill/asset toggle false). Upstream's getTradingBlockOffers
+ * treats an all-false value as "apply no filtering, don't save a
+ * preference" (api/index.ts's toConciseLookingFor); using empty
+ * positions/skills objects works for any sport without hardcoding
+ * basketball-specific position/skill keys. */
+const NEUTRAL_LOOKING_FOR = {
+  positions: {},
+  skills: {},
+  assets: { draftPicks: false, prospects: false, bestCurrentPlayers: false },
+};
+
 export type BasketballGmAdapter = {
   create(input: CreateEpisodeInput): Promise<void>;
   getRawState(): Promise<EngineRawState>;
@@ -404,7 +602,12 @@ export type BasketballGmAdapter = {
   getPlayer(params: { pid: number }): Promise<PlayerDetail>;
   getOptions(): Promise<EngineOption[]>;
   evaluateTrade(proposal: TradeProposal): Promise<TradeEvaluation>;
+  getTradingBlock(): Promise<TradingBlockData>;
+  getTradeProposals(): Promise<TradeProposalsData>;
   executeTrade(proposal: TradeProposal): Promise<EngineEvent[]>;
+  advertiseOnTradingBlock(
+    input: AdvertiseOnTradingBlockInput,
+  ): Promise<EngineEvent[]>;
   setLineup(input: SetLineupInput): Promise<EngineEvent[]>;
   releasePlayer(input: ReleasePlayerInput): Promise<EngineEvent[]>;
   negotiateContract(input: NegotiateContractInput): Promise<EngineEvent[]>;
@@ -761,7 +964,12 @@ export function createBasketballGmAdapter(
     const blocked = await isBlockedOnUserDraftPick();
     const pendingResignings = await hasPendingResigningNegotiations();
     if (!blocked) {
-      categories.push("execute_trade", "set_lineup", "release_player");
+      categories.push(
+        "execute_trade",
+        "advertise_on_trading_block",
+        "set_lineup",
+        "release_player",
+      );
       if (phaseNum() === ZENGM_PHASE.RESIGN_PLAYERS) {
         categories.push("negotiate_contract");
       } else if (phaseNum() === ZENGM_PHASE.FREE_AGENCY) {
@@ -1341,6 +1549,89 @@ export function createBasketballGmAdapter(
     };
   };
 
+  /** What the user has advertised on the trading block (if anything), the
+   * offers judged against it, and the roster players / owned picks eligible
+   * to advertise -- sourced from zengm's own trading-block worker view
+   * (src/worker/views/tradingBlock.ts), called with no pids/dpids so it
+   * reads back the currently saved advertisement instead of previewing a
+   * candidate one. Never mutates. Degrades to an all-empty TradingBlockData
+   * when the view is unavailable, throws, or returns an unexpected shape --
+   * matching getPlayer()'s defensive-mapping convention above. */
+  const getTradingBlock = async (): Promise<TradingBlockData> => {
+    requireCreated();
+    const empty: TradingBlockData = {
+      advertisedPids: [],
+      advertisedDpids: [],
+      offers: [],
+      tradableRoster: [],
+      tradablePicks: [],
+    };
+    const tradingBlockView = zengm.views?.tradingBlock;
+    if (!tradingBlockView) return empty;
+    let view: unknown;
+    try {
+      view = await tradingBlockView({});
+    } catch {
+      return empty;
+    }
+    if (!isRecord(view)) return empty;
+
+    const tradableRoster = mapAndSortTradableRoster(
+      Array.isArray(view["userRoster"]) ? view["userRoster"] : [],
+    );
+    const tradablePicks = mapAndSortTradablePicks(
+      Array.isArray(view["userPicks"]) ? view["userPicks"] : [],
+    );
+
+    const saved = isRecord(view["savedTradingBlock"])
+      ? view["savedTradingBlock"]
+      : undefined;
+    const advertisedPids = Array.isArray(saved?.["pids"])
+      ? saved["pids"].filter((pid): pid is number => typeof pid === "number")
+      : [];
+    const advertisedDpids = Array.isArray(saved?.["dpids"])
+      ? saved["dpids"].filter(
+          (dpid): dpid is number => typeof dpid === "number",
+        )
+      : [];
+    const offers = mapAndSortOffers(
+      Array.isArray(saved?.["offers"]) ? saved["offers"] : [],
+    );
+
+    return {
+      advertisedPids,
+      advertisedDpids,
+      offers,
+      tradableRoster,
+      tradablePicks,
+    };
+  };
+
+  /** AI-initiated trade offers the user did not solicit -- sourced from
+   * zengm's own trade-proposals worker view (src/worker/views/
+   * tradeProposals.ts). Never mutates. There is no separate "accept" path:
+   * an offer here can be turned into a TradeProposal (offered=offer.offered,
+   * requested=offer.requested, otherTeamId=offer.otherTeamId) and executed
+   * via executeTrade -- see docs/INFORMATION_AUDIT.md and this adapter's
+   * executeTrade(). Degrades to an empty offers list rather than throwing. */
+  const getTradeProposals = async (): Promise<TradeProposalsData> => {
+    requireCreated();
+    const empty: TradeProposalsData = { offers: [] };
+    const tradeProposalsView = zengm.views?.tradeProposals;
+    if (!tradeProposalsView) return empty;
+    let view: unknown;
+    try {
+      view = await tradeProposalsView({});
+    } catch {
+      return empty;
+    }
+    if (!isRecord(view)) return empty;
+    const offers = mapAndSortOffers(
+      Array.isArray(view["offers"]) ? view["offers"] : [],
+    );
+    return { offers };
+  };
+
   const getOptions = async (): Promise<EngineOption[]> => {
     requireCreated();
     const options: EngineOption[] = [
@@ -1478,6 +1769,32 @@ export function createBasketballGmAdapter(
     }
     await idb.cache.flush();
     return [{ type: "trade", otherTeamId: proposal.otherTeamId }];
+  };
+
+  /** Advertises the given roster players / owned picks on the trading
+   * block -- calls zengm's own api.main.getTradingBlockOffers, the same
+   * function the real UI's "Ask For Trade Proposals" button calls, which
+   * both computes AI counter-offers AND persists the advertisement
+   * (idb.cache.savedTradingBlock) as a side effect. Does not reimplement any
+   * trade-offer logic. An empty pids/dpids pair clears the trading block. */
+  const advertiseOnTradingBlock = async (
+    input: AdvertiseOnTradingBlockInput,
+  ): Promise<EngineEvent[]> => {
+    requireCreated();
+    const offers = await api.main.getTradingBlockOffers({
+      pids: input.pids,
+      dpids: input.dpids,
+      lookingFor: NEUTRAL_LOOKING_FOR,
+    });
+    await idb.cache.flush();
+    return [
+      {
+        type: "trading_block_advertised",
+        pids: input.pids,
+        dpids: input.dpids,
+        offerCount: Array.isArray(offers) ? offers.length : 0,
+      },
+    ];
   };
 
   const setLineup = async (input: SetLineupInput): Promise<EngineEvent[]> => {
@@ -1818,7 +2135,10 @@ export function createBasketballGmAdapter(
     getPlayer,
     getOptions,
     evaluateTrade,
+    getTradingBlock,
+    getTradeProposals,
     executeTrade,
+    advertiseOnTradingBlock,
     setLineup,
     releasePlayer,
     negotiateContract,

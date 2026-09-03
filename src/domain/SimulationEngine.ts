@@ -1,5 +1,6 @@
 import type {
   AdvanceInput,
+  AdvertiseOnTradingBlockInput,
   CreateEpisodeInput,
   EngineEvent,
   EngineMetadata,
@@ -14,6 +15,8 @@ import type {
   SignFreeAgentInput,
   TradeEvaluation,
   TradeProposal,
+  TradeProposalsData,
+  TradingBlockData,
 } from "./types.js";
 
 /**
@@ -52,7 +55,24 @@ export type SimulationEngine = {
   /** Must not mutate state. */
   evaluateTrade(proposal: TradeProposal): Promise<TradeEvaluation>;
 
+  /**
+   * What the user has advertised on the trading block (if anything), the
+   * offers judged against it, and the roster players / owned picks eligible
+   * to advertise. Must not mutate state. See adapter.ts's getTradingBlock().
+   */
+  getTradingBlock(): Promise<TradingBlockData>;
+
+  /**
+   * AI-initiated trade offers the user did not solicit. Must not mutate
+   * state. An offer here can be accepted via executeTrade -- there is no
+   * separate accept path; see adapter.ts's getTradeProposals().
+   */
+  getTradeProposals(): Promise<TradeProposalsData>;
+
   executeTrade(proposal: TradeProposal): Promise<EngineEvent[]>;
+  advertiseOnTradingBlock(
+    input: AdvertiseOnTradingBlockInput,
+  ): Promise<EngineEvent[]>;
   setLineup(input: SetLineupInput): Promise<EngineEvent[]>;
   releasePlayer(input: ReleasePlayerInput): Promise<EngineEvent[]>;
   negotiateContract(input: NegotiateContractInput): Promise<EngineEvent[]>;

@@ -40,7 +40,7 @@ describe.skipIf(!built)("spawned stdio server", () => {
       // frame and this would fail to parse rather than resolve.
       await client.connect(transport);
       const listed = await client.listTools();
-      expect(listed.tools.length).toBe(17);
+      expect(listed.tools.length).toBe(18);
       for (const tool of listed.tools) {
         expect(tool.inputSchema, tool.name).toBeDefined();
         expect(tool.outputSchema, tool.name).toBeDefined();
@@ -85,7 +85,7 @@ describe.skipIf(!built)("spawned stdio server", () => {
       expect(client.getProtocolEra()).toBe("modern");
       expect(client.getNegotiatedProtocolVersion()).toBe("2026-07-28");
       const listed = await client.listTools();
-      expect(listed.tools).toHaveLength(17);
+      expect(listed.tools).toHaveLength(18);
       expect(
         listed.tools.every((tool) => tool.inputSchema && tool.outputSchema),
       ).toBe(true);

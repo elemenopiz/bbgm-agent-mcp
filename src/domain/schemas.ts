@@ -416,6 +416,54 @@ export const paginationInputSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Trading block / trade proposals asset shapes. Defined before "get_state
+// views" below because tradingBlockViewSchema/tradeProposalsViewSchema
+// (part of leagueStateViewSchema) reference tradeOfferSchema -- zod schemas
+// are runtime values, not hoisted types, so the reference must come after
+// the definition.
+// ---------------------------------------------------------------------------
+
+export const tradeOfferAssetSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("player"),
+      pid: pidSchema,
+      name: z.string().optional(),
+      age: z.number().int().optional(),
+      position: z.string().optional(),
+      overall: z.number().optional(),
+      potential: z.number().optional(),
+      contractAmount: z.number().optional(),
+      contractExpires: z.number().int().optional(),
+      skills: z.array(z.string()).optional(),
+      untradable: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("draft_pick"),
+      dpid: dpidSchema,
+      season: z.number().int().optional(),
+      round: z.number().int().optional(),
+      description: z.string().optional(),
+    })
+    .strict(),
+]);
+
+export const tradeOfferSchema = z
+  .object({
+    otherTeamId: teamIdSchema,
+    strategy: z.string().optional(),
+    won: z.number().int().nonnegative().optional(),
+    lost: z.number().int().nonnegative().optional(),
+    payroll: z.number().optional(),
+    offered: z.array(tradeOfferAssetSchema),
+    requested: z.array(tradeOfferAssetSchema),
+    willing: z.boolean().optional(),
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
 // get_state views
 // ---------------------------------------------------------------------------
 
@@ -532,6 +580,26 @@ export const constraintsViewSchema = z
   })
   .strict();
 
+export const tradingBlockViewSchema = z
+  .object({
+    ...viewEnvelopeSchema,
+    view: z.literal("trading_block"),
+    advertisedPids: z.array(pidSchema),
+    advertisedDpids: z.array(dpidSchema),
+    offers: z.array(tradeOfferSchema),
+    tradableRoster: z.array(tradeOfferAssetSchema),
+    tradablePicks: z.array(tradeOfferAssetSchema),
+  })
+  .strict();
+
+export const tradeProposalsViewSchema = z
+  .object({
+    ...viewEnvelopeSchema,
+    view: z.literal("trade_proposals"),
+    offers: z.array(tradeOfferSchema),
+  })
+  .strict();
+
 export const leagueStateViewSchema = z.discriminatedUnion("view", [
   overviewViewSchema,
   rosterViewSchema,
@@ -543,6 +611,8 @@ export const leagueStateViewSchema = z.discriminatedUnion("view", [
   transactionsViewSchema,
   objectivesViewSchema,
   constraintsViewSchema,
+  tradingBlockViewSchema,
+  tradeProposalsViewSchema,
 ]);
 
 export const getStateInputSchema = z
@@ -609,6 +679,24 @@ export const tradeEvaluationSchema = z
         requested: z.array(tradeAssetSchema),
       })
       .strict(),
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Trading block / trade proposals mutation input (tradeOfferAssetSchema /
+// tradeOfferSchema are defined earlier, before "get_state views")
+// ---------------------------------------------------------------------------
+
+export const advertiseOnTradingBlockInputSchema = z
+  .object({
+    pids: z
+      .array(pidSchema)
+      .max(20)
+      .describe("Roster player IDs to advertise; empty array clears them"),
+    dpids: z
+      .array(dpidSchema)
+      .max(20)
+      .describe("Owned draft pick IDs to advertise; empty array clears them"),
   })
   .strict();
 

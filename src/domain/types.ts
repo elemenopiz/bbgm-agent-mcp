@@ -15,6 +15,8 @@ export const DEFAULT_ALLOWED_INFORMATION = [
   "constraints",
   "options",
   "player_detail",
+  "trading_block",
+  "trade_proposals",
 ] as const;
 
 export const DEFAULT_ALLOWED_ACTIONS = [
@@ -29,6 +31,7 @@ export const DEFAULT_ALLOWED_ACTIONS = [
   "create_checkpoint",
   "list_checkpoints",
   "restore_checkpoint",
+  "advertise_on_trading_block",
 ] as const;
 
 export const ADVANCE_TARGETS = [
@@ -511,6 +514,8 @@ export const GET_STATE_VIEWS = [
   "transactions",
   "objectives",
   "constraints",
+  "trading_block",
+  "trade_proposals",
 ] as const;
 export type GetStateViewName = (typeof GET_STATE_VIEWS)[number];
 
@@ -615,6 +620,12 @@ export type ConstraintsView = ViewEnvelope & {
   constraints: ConstraintStatus[];
 };
 
+export type TradingBlockView = ViewEnvelope &
+  TradingBlockData & { view: "trading_block" };
+
+export type TradeProposalsView = ViewEnvelope &
+  TradeProposalsData & { view: "trade_proposals" };
+
 export type LeagueStateView =
   | OverviewView
   | RosterView
@@ -625,7 +636,9 @@ export type LeagueStateView =
   | DraftView
   | TransactionsView
   | ObjectivesView
-  | ConstraintsView;
+  | ConstraintsView
+  | TradingBlockView
+  | TradeProposalsView;
 
 // ---------------------------------------------------------------------------
 // get_options
@@ -679,6 +692,83 @@ export type TradeEvaluation = {
   payrollDelta: number;
   rosterSizeDelta: number;
   assetsExchanged: { offered: TradeAsset[]; requested: TradeAsset[] };
+};
+
+// ---------------------------------------------------------------------------
+// Trading block / trade proposals (bbgm_get_state view="trading_block" /
+// view="trade_proposals", bbgm_advertise_on_trading_block). Sourced from
+// zengm's own tradingBlock/tradeProposals worker views rather than
+// reimplemented trade logic -- see docs/INFORMATION_AUDIT.md and
+// adapter.ts's getTradingBlock()/getTradeProposals(). Deliberately excludes
+// zengm's internal `value` composite valuation, same as PlayerDetail.
+// ---------------------------------------------------------------------------
+
+/** A tradable asset as it appears in a trading-block advertisement or a
+ * received offer -- richer than TradeAsset (which is only an identifier
+ * used to construct a TradeProposal for bbgm_execute_trade). */
+export type TradeOfferAsset =
+  | {
+      type: "player";
+      pid: number;
+      name?: string;
+      age?: number;
+      position?: string;
+      overall?: number;
+      potential?: number;
+      /** Millions of dollars. */
+      contractAmount?: number;
+      contractExpires?: number;
+      skills?: string[];
+      untradable?: boolean;
+    }
+  | {
+      type: "draft_pick";
+      dpid: number;
+      season?: number;
+      round?: number;
+      description?: string;
+    };
+
+/** One trade offer from another team, oriented the same way as
+ * TradeProposal: `offered` is what the user would give up, `requested` is
+ * what the user would receive -- so an offer here can be turned directly
+ * into a bbgm_execute_trade call by dropping the display fields. Shared
+ * shape for a trading-block-advertisement response and an AI-initiated
+ * trade proposal. */
+export type TradeOffer = {
+  otherTeamId: number;
+  /** "rebuilding" | "contending", when the engine exposes it. */
+  strategy?: string;
+  won?: number;
+  lost?: number;
+  /** Millions of dollars. */
+  payroll?: number;
+  offered: TradeOfferAsset[];
+  requested: TradeOfferAsset[];
+  /** Whether the other team's own trade-AI valuation currently favors this
+   * offer. Present for trading-block offers (computed against the user's
+   * advertised assets); AI-initiated trade proposals are already offers the
+   * AI wants to make, so this is omitted there rather than implied true. */
+  willing?: boolean;
+};
+
+export type TradingBlockData = {
+  advertisedPids: number[];
+  advertisedDpids: number[];
+  offers: TradeOffer[];
+  /** Roster players eligible to advertise (untradable ones are included but flagged). */
+  tradableRoster: TradeOfferAsset[];
+  /** Owned draft picks eligible to advertise. */
+  tradablePicks: TradeOfferAsset[];
+};
+
+export type TradeProposalsData = {
+  offers: TradeOffer[];
+};
+
+export type AdvertiseOnTradingBlockInput = {
+  pids: number[];
+  dpids: number[];
 };
 
 export type AdvanceInput = {

@@ -25,6 +25,7 @@ import {
 } from "./normalization.js";
 import {
   advanceInputSchema,
+  advertiseOnTradingBlockInputSchema,
   createEpisodeInputSchema,
   endEpisodeInputSchema,
   getPlayerInputSchema,
@@ -45,6 +46,7 @@ import {
 import type {
   AdvanceInput,
   AdvanceTarget,
+  AdvertiseOnTradingBlockInput,
   Checkpoint,
   ConstraintStatus,
   EndEpisodeInput,
@@ -67,6 +69,8 @@ import type {
   SignFreeAgentInput,
   TradeEvaluation,
   TradeProposal,
+  TradeProposalsData,
+  TradingBlockData,
 } from "./types.js";
 
 const logger = createLogger("DomainService");
@@ -446,6 +450,19 @@ export class DomainService {
       rosterOverride = { teamId: input.teamId, players };
     }
 
+    let tradingBlockOverride: TradingBlockData | undefined;
+    if (input.view === "trading_block") {
+      tradingBlockOverride = await this.runQueued(record, () =>
+        record.engine.getTradingBlock(),
+      );
+    }
+    let tradeProposalsOverride: TradeProposalsData | undefined;
+    if (input.view === "trade_proposals") {
+      tradeProposalsOverride = await this.runQueued(record, () =>
+        record.engine.getTradeProposals(),
+      );
+    }
+
     const result = buildView(
       input.view,
       {
@@ -463,6 +480,8 @@ export class DomainService {
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
         ...(input.limit === undefined ? {} : { limit: input.limit }),
         ...(rosterOverride ? { rosterOverride } : {}),
+        ...(tradingBlockOverride ? { tradingBlockOverride } : {}),
+        ...(tradeProposalsOverride ? { tradeProposalsOverride } : {}),
       },
     );
     await this.logAttempt(record, {
@@ -631,6 +650,65 @@ export class DomainService {
       disallowedPhases: ["draft"],
       legality: (state) => this.assertLegalTrade(state, proposal),
       execute: (record) => record.engine.executeTrade(proposal),
+    });
+  }
+
+  /**
+   * Advertises roster players / owned picks on the trading block. A
+   * MUTATION, not a read: it persists engine state (zengm's
+   * idb.cache.savedTradingBlock) the same way every other action here does
+   * -- optimistic expectedRevision check, durable idempotencyKey, and
+   * rollback to the pre-action snapshot on a hard-constraint failure -- see
+   * runMutation(). An empty pids/dpids pair clears the trading block.
+   */
+  async advertiseOnTradingBlock(
+    episodeId: string,
+    rawInput: unknown,
+    context: MutationContext,
+  ): Promise<MutationResult> {
+    const input: AdvertiseOnTradingBlockInput = parse(
+      advertiseOnTradingBlockInputSchema,
+      rawInput,
+    );
+    return this.runMutation(episodeId, context, {
+      toolName: "bbgm_advertise_on_trading_block",
+      appliedAction: {
+        type: "advertise_on_trading_block",
+        pids: input.pids,
+        dpids: input.dpids,
+      },
+      args: { input },
+      disallowedPhases: ["draft"],
+      legality: (state) => {
+        const rosterPlayers = new Map(
+          state.roster.map((player) => [player.pid, player]),
+        );
+        for (const pid of input.pids) {
+          const player = rosterPlayers.get(pid);
+          if (!player) {
+            throw new DomainError(
+              "ILLEGAL_ACTION",
+              `Player ${pid} is not on the user's roster`,
+            );
+          }
+          if (player.untradable) {
+            throw new DomainError(
+              "ILLEGAL_ACTION",
+              `Player ${pid} is untradable and cannot be advertised`,
+            );
+          }
+        }
+        const ownedDpids = new Set(state.ownedPicks.map((pick) => pick.dpid));
+        for (const dpid of input.dpids) {
+          if (!ownedDpids.has(dpid)) {
+            throw new DomainError(
+              "ILLEGAL_ACTION",
+              `Draft pick ${dpid} is not owned by the user`,
+            );
+          }
+        }
+      },
+      execute: (record) => record.engine.advertiseOnTradingBlock(input),
     });
   }
 

@@ -75,6 +75,7 @@ const EXPECTED_TOOL_NAMES = [
   "bbgm_get_player",
   "bbgm_evaluate_trade",
   "bbgm_execute_trade",
+  "bbgm_advertise_on_trading_block",
   "bbgm_set_lineup",
   "bbgm_release_player",
   "bbgm_negotiate_contract",

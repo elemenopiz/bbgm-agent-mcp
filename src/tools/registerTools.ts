@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 
 import type { DomainService } from "../domain/DomainService.js";
 import { registerAdvance } from "./advance.js";
+import { registerAdvertiseOnTradingBlock } from "./advertiseOnTradingBlock.js";
 import { registerCreateEpisode } from "./createEpisode.js";
 import { registerCreateCheckpoint } from "./createCheckpoint.js";
 import { registerEndEpisode } from "./endEpisode.js";
@@ -33,6 +34,7 @@ export const registerTools = (
   registerGetPlayer(server, domain);
   registerEvaluateTrade(server, domain);
   registerExecuteTrade(server, domain);
+  registerAdvertiseOnTradingBlock(server, domain);
   registerSetLineup(server, domain);
   registerReleasePlayer(server, domain);
   registerNegotiateContract(server, domain);

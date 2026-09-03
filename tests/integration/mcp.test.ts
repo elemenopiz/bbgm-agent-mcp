@@ -36,7 +36,7 @@ afterEach(async () => {
 });
 
 describe("MCP server", () => {
-  test("lists all 17 tools, each with an input and output schema", async () => {
+  test("lists all 18 tools, each with an input and output schema", async () => {
     const listed = await client.listTools();
     const expectedNames = [
       "bbgm_create_episode",
@@ -49,6 +49,7 @@ describe("MCP server", () => {
       "bbgm_get_player",
       "bbgm_evaluate_trade",
       "bbgm_execute_trade",
+      "bbgm_advertise_on_trading_block",
       "bbgm_set_lineup",
       "bbgm_release_player",
       "bbgm_negotiate_contract",

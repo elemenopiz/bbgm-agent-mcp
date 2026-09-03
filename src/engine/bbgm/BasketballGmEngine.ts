@@ -5,6 +5,7 @@ import type { Method } from "../process/protocol.js";
 import type { SimulationEngine } from "../../domain/SimulationEngine.js";
 import type {
   AdvanceInput,
+  AdvertiseOnTradingBlockInput,
   CreateEpisodeInput,
   EngineEvent,
   EngineMetadata,
@@ -19,6 +20,8 @@ import type {
   SignFreeAgentInput,
   TradeEvaluation,
   TradeProposal,
+  TradeProposalsData,
+  TradingBlockData,
 } from "../../domain/types.js";
 
 export const BASKETBALL_GM_ENGINE_METADATA: EngineMetadata = {
@@ -91,8 +94,22 @@ export class BasketballGmEngine implements SimulationEngine {
     return this.call<TradeEvaluation>("evaluateTrade", proposal);
   }
 
+  async getTradingBlock(): Promise<TradingBlockData> {
+    return this.call<TradingBlockData>("getTradingBlock");
+  }
+
+  async getTradeProposals(): Promise<TradeProposalsData> {
+    return this.call<TradeProposalsData>("getTradeProposals");
+  }
+
   async executeTrade(proposal: TradeProposal): Promise<EngineEvent[]> {
     return this.call<EngineEvent[]>("executeTrade", proposal);
+  }
+
+  async advertiseOnTradingBlock(
+    input: AdvertiseOnTradingBlockInput,
+  ): Promise<EngineEvent[]> {
+    return this.call<EngineEvent[]>("advertiseOnTradingBlock", input);
   }
 
   async setLineup(input: SetLineupInput): Promise<EngineEvent[]> {

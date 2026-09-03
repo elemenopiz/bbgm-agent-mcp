@@ -17,6 +17,10 @@ import type {
   ScenarioConstraintSpec,
   ScheduleView,
   StandingsView,
+  TradeProposalsData,
+  TradeProposalsView,
+  TradingBlockData,
+  TradingBlockView,
   TransactionsView,
 } from "./types.js";
 import { STATE_SCHEMA_VERSION } from "./types.js";
@@ -310,6 +314,34 @@ const buildConstraintsView = (
   constraints,
 });
 
+const buildTradingBlockView = (
+  input: EnvelopeInput,
+  data: TradingBlockData,
+): TradingBlockView => ({
+  schemaVersion: STATE_SCHEMA_VERSION,
+  view: "trading_block",
+  episodeId: input.episodeId,
+  revision: input.revision,
+  stateHash: input.stateHash,
+  season: input.state.season,
+  phase: input.state.phase,
+  ...data,
+});
+
+const buildTradeProposalsView = (
+  input: EnvelopeInput,
+  data: TradeProposalsData,
+): TradeProposalsView => ({
+  schemaVersion: STATE_SCHEMA_VERSION,
+  view: "trade_proposals",
+  episodeId: input.episodeId,
+  revision: input.revision,
+  stateHash: input.stateHash,
+  season: input.state.season,
+  phase: input.state.phase,
+  ...data,
+});
+
 export type ViewContext = {
   status: EpisodeStatus;
   constraints: ConstraintStatus[];
@@ -320,6 +352,10 @@ export type ViewContext = {
   limit?: number;
   /** Set when view="roster" is reading a team other than the user's own -- see DomainService.getState. */
   rosterOverride?: { teamId: number; players: PlayerSummary[] };
+  /** Required when view="trading_block" -- see DomainService.readState. */
+  tradingBlockOverride?: TradingBlockData;
+  /** Required when view="trade_proposals" -- see DomainService.readState. */
+  tradeProposalsOverride?: TradeProposalsData;
 };
 
 export const buildView = (
@@ -359,5 +395,19 @@ export const buildView = (
       return buildObjectivesView(input, context.objectives);
     case "constraints":
       return buildConstraintsView(input, context.constraints);
+    case "trading_block":
+      if (!context.tradingBlockOverride) {
+        throw new Error(
+          "buildView(trading_block) requires context.tradingBlockOverride",
+        );
+      }
+      return buildTradingBlockView(input, context.tradingBlockOverride);
+    case "trade_proposals":
+      if (!context.tradeProposalsOverride) {
+        throw new Error(
+          "buildView(trade_proposals) requires context.tradeProposalsOverride",
+        );
+      }
+      return buildTradeProposalsView(input, context.tradeProposalsOverride);
   }
 };

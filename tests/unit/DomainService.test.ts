@@ -188,6 +188,8 @@ describe("DomainService.getState views", () => {
       "transactions",
       "objectives",
       "constraints",
+      "trading_block",
+      "trade_proposals",
     ] as const;
     for (const view of views) {
       const result = await domain.getState({
@@ -273,6 +275,182 @@ describe("DomainService.getState views", () => {
       view: "roster",
     });
     expect(own.view).toBe("roster");
+  });
+});
+
+describe("DomainService trading block / trade proposals", () => {
+  test("trading_block view starts with nothing advertised but a populated tradableRoster/tradablePicks", async () => {
+    const overview = await createEpisode();
+    const result = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "trading_block",
+    });
+    if (result.view !== "trading_block")
+      throw new Error("expected trading_block view");
+    expect(result.advertisedPids).toEqual([]);
+    expect(result.advertisedDpids).toEqual([]);
+    expect(result.offers).toEqual([]);
+    expect(result.tradableRoster).toHaveLength(12);
+    expect(result.tradablePicks).toHaveLength(6);
+    for (const asset of result.tradableRoster)
+      expect(asset.type).toBe("player");
+    for (const asset of result.tradablePicks)
+      expect(asset.type).toBe("draft_pick");
+  });
+
+  test("trade_proposals view returns AI-initiated offers oriented like a TradeProposal", async () => {
+    const overview = await createEpisode();
+    const result = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "trade_proposals",
+    });
+    if (result.view !== "trade_proposals")
+      throw new Error("expected trade_proposals view");
+    expect(result.offers.length).toBeGreaterThan(0);
+    const roster = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "roster",
+    });
+    if (roster.view !== "roster") throw new Error("expected roster view");
+    const ownedPids = new Set(roster.players.map((p) => p.pid));
+    for (const offer of result.offers) {
+      expect(offer.offered.length).toBeGreaterThan(0);
+      expect(offer.requested.length).toBeGreaterThan(0);
+      for (const asset of offer.offered) {
+        if (asset.type === "player")
+          expect(ownedPids.has(asset.pid)).toBe(true);
+      }
+      for (const asset of offer.requested) {
+        if (asset.type === "player")
+          expect(ownedPids.has(asset.pid)).toBe(false);
+      }
+    }
+  });
+
+  test("advertising a player is reflected on the trading block and generates offers", async () => {
+    const overview = await createEpisode();
+    const roster = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "roster",
+    });
+    if (roster.view !== "roster") throw new Error("expected roster view");
+    const target = roster.players[0]!;
+
+    const result = await domain.advertiseOnTradingBlock(
+      overview.episodeId,
+      { pids: [target.pid], dpids: [] },
+      { expectedRevision: 0, idempotencyKey: "advertise-1" },
+    );
+    expect(result.revision).toBe(1);
+    expect(result.events).toHaveLength(1);
+    const [advertisedEvent] = result.events;
+    expect(advertisedEvent?.type).toBe("trading_block_advertised");
+    expect(advertisedEvent?.["pids"]).toEqual([target.pid]);
+    expect(advertisedEvent?.["dpids"]).toEqual([]);
+    expect(typeof advertisedEvent?.["offerCount"]).toBe("number");
+
+    const block = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "trading_block",
+    });
+    if (block.view !== "trading_block")
+      throw new Error("expected trading_block view");
+    expect(block.advertisedPids).toEqual([target.pid]);
+    expect(block.advertisedDpids).toEqual([]);
+    expect(block.offers.length).toBeGreaterThan(0);
+    for (const offer of block.offers) {
+      expect(offer.willing).toBe(true);
+      expect(
+        offer.offered.some(
+          (asset) => asset.type === "player" && asset.pid === target.pid,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  test("advertising an unowned player is rejected without changing state", async () => {
+    const overview = await createEpisode();
+    await expect(
+      domain.advertiseOnTradingBlock(
+        overview.episodeId,
+        { pids: [999_999], dpids: [] },
+        { expectedRevision: 0, idempotencyKey: "advertise-bad" },
+      ),
+    ).rejects.toMatchObject({ code: "ILLEGAL_ACTION" });
+    const overviewAfter = (await domain.getState({
+      episodeId: overview.episodeId,
+      view: "overview",
+    })) as OverviewView;
+    expect(overviewAfter.revision).toBe(0);
+  });
+
+  test("advertising with a stale expectedRevision is rejected", async () => {
+    const overview = await createEpisode();
+    const roster = await domain.getState({
+      episodeId: overview.episodeId,
+      view: "roster",
+    });
+    if (roster.view !== "roster") throw new Error("expected roster view");
+    const target = roster.players[0]!;
+
+    await domain.advertiseOnTradingBlock(
+      overview.episodeId,
+      { pids: [target.pid], dpids: [] },
+      { expectedRevision: 0, idempotencyKey: "advertise-stale-1" },
+    );
+    await expect(
+      domain.advertiseOnTradingBlock(
+        overview.episodeId,
+        { pids: [target.pid], dpids: [] },
+        { expectedRevision: 0, idempotencyKey: "advertise-stale-2" },
+      ),
+    ).rejects.toMatchObject({
+      code: "REVISION_CONFLICT",
+      retryable: true,
+      details: { expectedRevision: 0, currentRevision: 1 },
+    });
+  });
+
+  test("rejects when the scenario does not allow the trading_block/trade_proposals information channels", async () => {
+    const overview = await domain.createEpisode({
+      scenarioId: "test",
+      seed: "1",
+      userTeamId: 0,
+      startingSeason: 2026,
+      scenarioPolicy: {
+        allowedInformation: ["overview", "roster"],
+        allowedActions: [...DEFAULT_ALLOWED_ACTIONS],
+      },
+    });
+    await expect(
+      domain.getState({ episodeId: overview.episodeId, view: "trading_block" }),
+    ).rejects.toMatchObject({ code: "INFORMATION_NOT_ALLOWED" });
+    await expect(
+      domain.getState({
+        episodeId: overview.episodeId,
+        view: "trade_proposals",
+      }),
+    ).rejects.toMatchObject({ code: "INFORMATION_NOT_ALLOWED" });
+  });
+
+  test("rejects the advertise action when the scenario does not allow it", async () => {
+    const overview = await domain.createEpisode({
+      scenarioId: "test",
+      seed: "1",
+      userTeamId: 0,
+      startingSeason: 2026,
+      scenarioPolicy: {
+        allowedInformation: [...DEFAULT_ALLOWED_INFORMATION],
+        allowedActions: ["evaluate_trade", "execute_trade"],
+      },
+    });
+    await expect(
+      domain.advertiseOnTradingBlock(
+        overview.episodeId,
+        { pids: [], dpids: [] },
+        { expectedRevision: 0, idempotencyKey: "advertise-forbidden" },
+      ),
+    ).rejects.toMatchObject({ code: "ACTION_NOT_ALLOWED" });
   });
 });
 

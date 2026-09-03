@@ -417,6 +417,125 @@ describe.skipIf(!runRealEngine)("BasketballGmEngine (real engine)", () => {
   );
 
   test(
+    "advertises on the trading block, reads AI trade proposals, and rejects a stale revision",
+    { timeout: 180_000 },
+    async () => {
+      const dataRoot = await mkdtemp(
+        join(tmpdir(), "bbgm-real-engine-trading-block-test-"),
+      );
+      dataRoots.push(dataRoot);
+      const episodes = new EpisodeManager(
+        () => new BasketballGmEngine(),
+        dataRoot,
+      );
+      const domain = new DomainService(
+        episodes,
+        createFileSnapshotStore(dataRoot),
+      );
+      domains.push(domain);
+
+      const overview = await domain.createEpisode({
+        scenarioId: "real-engine-trading-block-test",
+        seed: "real-engine-trading-block-seed",
+        userTeamId: 0,
+        startingSeason: new Date().getFullYear(),
+      });
+
+      // -- empty trading block before anything is advertised --
+      const emptyBlock = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "trading_block",
+      });
+      if (emptyBlock.view !== "trading_block")
+        throw new Error("expected trading_block view");
+      expect(emptyBlock.advertisedPids).toEqual([]);
+      expect(emptyBlock.advertisedDpids).toEqual([]);
+      expect(emptyBlock.offers).toEqual([]);
+      expect(emptyBlock.tradableRoster.length).toBeGreaterThan(0);
+
+      // -- AI-initiated trade proposals, independent of the trading block --
+      const proposals = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "trade_proposals",
+      });
+      if (proposals.view !== "trade_proposals")
+        throw new Error("expected trade_proposals view");
+      for (const proposalOffer of proposals.offers) {
+        expect(proposalOffer.offered.length).toBeGreaterThan(0);
+        expect(proposalOffer.requested.length).toBeGreaterThan(0);
+        // The internal composite valuation must never be exposed.
+        for (const asset of [
+          ...proposalOffer.offered,
+          ...proposalOffer.requested,
+        ]) {
+          expect(asset).not.toHaveProperty("value");
+        }
+      }
+
+      // -- advertise a tradable roster player --
+      const tradable = emptyBlock.tradableRoster.find(
+        (asset) => asset.type === "player" && asset.untradable !== true,
+      );
+      if (tradable?.type !== "player")
+        throw new Error("expected at least one tradable roster player");
+      const advertised = await domain.advertiseOnTradingBlock(
+        overview.episodeId,
+        { pids: [tradable.pid], dpids: [] },
+        {
+          expectedRevision: overview.revision,
+          idempotencyKey: "real-trading-block-advertise-0001",
+        },
+      );
+      expect(advertised.revision).toBe(overview.revision + 1);
+      expect(
+        advertised.events.some(
+          (event) => event.type === "trading_block_advertised",
+        ),
+      ).toBe(true);
+
+      const block = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "trading_block",
+      });
+      if (block.view !== "trading_block")
+        throw new Error("expected trading_block view");
+      expect(block.advertisedPids).toEqual([tradable.pid]);
+      for (const offer of block.offers) {
+        for (const asset of [...offer.offered, ...offer.requested]) {
+          expect(asset).not.toHaveProperty("value");
+        }
+      }
+
+      // -- a stale expectedRevision must be rejected, leaving state unchanged --
+      await expect(
+        domain.advertiseOnTradingBlock(
+          overview.episodeId,
+          { pids: [tradable.pid], dpids: [] },
+          {
+            expectedRevision: overview.revision,
+            idempotencyKey: "real-trading-block-stale-0001",
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: "REVISION_CONFLICT",
+        retryable: true,
+        details: {
+          expectedRevision: overview.revision,
+          currentRevision: advertised.revision,
+        },
+      });
+      const afterStaleAttempt = await domain.getState({
+        episodeId: overview.episodeId,
+        view: "trading_block",
+      });
+      if (afterStaleAttempt.view !== "trading_block")
+        throw new Error("expected trading_block view");
+      expect(afterStaleAttempt.advertisedPids).toEqual([tradable.pid]);
+      expect(afterStaleAttempt.revision).toBe(advertised.revision);
+    },
+  );
+
+  test(
     "makes a real draft pick after advancing a fresh league to the user decision",
     { timeout: 180_000 },
     async () => {

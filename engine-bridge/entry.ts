@@ -134,6 +134,10 @@ const adapter = createBasketballGmAdapter({
       zengmViews["roster"]?.(inputs, ["firstRun"], {}),
     player: async (inputs: unknown) =>
       zengmViews["player"]?.(inputs, ["firstRun"], {}),
+    tradingBlock: async (inputs: unknown) =>
+      zengmViews["tradingBlock"]?.(inputs, ["firstRun"], {}),
+    tradeProposals: async (inputs: unknown) =>
+      zengmViews["tradeProposals"]?.(inputs, ["firstRun"], {}),
   },
   // `bbgm.api`'s real type lives inside the zengm checkout, which this repo
   // has no compile-time dependency on -- narrow, documented compatibility
@@ -163,7 +167,11 @@ const handlers: Record<string, (params: any) => Promise<unknown>> = {
   getPlayer: async (params) => adapter.getPlayer(params),
   getOptions: async () => adapter.getOptions(),
   evaluateTrade: async (params) => adapter.evaluateTrade(params),
+  getTradingBlock: async () => adapter.getTradingBlock(),
+  getTradeProposals: async () => adapter.getTradeProposals(),
   executeTrade: async (params) => adapter.executeTrade(params),
+  advertiseOnTradingBlock: async (params) =>
+    adapter.advertiseOnTradingBlock(params),
   setLineup: async (params) => adapter.setLineup(params),
   releasePlayer: async (params) => adapter.releasePlayer(params),
   negotiateContract: async (params) => adapter.negotiateContract(params),

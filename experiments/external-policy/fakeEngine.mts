@@ -101,8 +101,26 @@ export class DeterministicDemoEngine implements SimulationEngine {
     };
   }
 
+  async getTradingBlock() {
+    return {
+      advertisedPids: [],
+      advertisedDpids: [],
+      offers: [],
+      tradableRoster: [],
+      tradablePicks: [],
+    };
+  }
+
+  async getTradeProposals() {
+    return { offers: [] };
+  }
+
   async executeTrade(): Promise<EngineEvent[]> {
     return this.unsupported("execute_trade");
+  }
+
+  async advertiseOnTradingBlock(): Promise<EngineEvent[]> {
+    return this.unsupported("advertise_on_trading_block");
   }
 
   async setLineup(): Promise<EngineEvent[]> {

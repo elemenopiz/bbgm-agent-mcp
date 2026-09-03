@@ -3,6 +3,7 @@ import seedrandom from "seedrandom";
 import type { SimulationEngine } from "../../src/domain/SimulationEngine.js";
 import type {
   AdvanceInput,
+  AdvertiseOnTradingBlockInput,
   CreateEpisodeInput,
   DraftPickSummary,
   EngineEvent,
@@ -17,7 +18,11 @@ import type {
   SetLineupInput,
   SignFreeAgentInput,
   TradeEvaluation,
+  TradeOffer,
+  TradeOfferAsset,
   TradeProposal,
+  TradeProposalsData,
+  TradingBlockData,
   TransactionRecord,
 } from "../../src/domain/types.js";
 
@@ -49,12 +54,35 @@ type FakeSnapshot = {
   transactions: TransactionRecord[];
   nextEntityId: number;
   rngState: unknown;
+  advertisedPids: number[];
+  advertisedDpids: number[];
 };
 
 const playerValue = (player: PlayerSummary): number =>
   player.overall * 2 + player.potential;
 const pickValue = (pick: DraftPickSummary): number =>
   pick.round === 1 ? 40 : 15;
+
+const playerToOfferAsset = (player: PlayerSummary): TradeOfferAsset => ({
+  type: "player",
+  pid: player.pid,
+  name: player.name,
+  age: player.age,
+  position: player.position,
+  overall: player.overall,
+  potential: player.potential,
+  contractAmount: player.contractAmount,
+  contractExpires: player.contractExpires,
+  ...(player.skills === undefined ? {} : { skills: player.skills }),
+  ...(player.untradable === undefined ? {} : { untradable: player.untradable }),
+});
+
+const pickToOfferAsset = (pick: DraftPickSummary): TradeOfferAsset => ({
+  type: "draft_pick",
+  dpid: pick.dpid,
+  season: pick.season,
+  round: pick.round,
+});
 
 /**
  * A small, fully deterministic in-process simulation used only in unit tests.
@@ -83,6 +111,8 @@ export class FakeSimulationEngine implements SimulationEngine {
   private userLost = 0;
   private transactions: TransactionRecord[] = [];
   private nextEntityId = 1;
+  private advertisedPids: number[] = [];
+  private advertisedDpids: number[] = [];
   private closed = false;
   private rng: seedrandom.StatefulPRNG<seedrandom.State.Arc4> = seedrandom(
     "uninitialized",
@@ -103,6 +133,8 @@ export class FakeSimulationEngine implements SimulationEngine {
     this.userLost = 0;
     this.transactions = [];
     this.nextEntityId = 1;
+    this.advertisedPids = [];
+    this.advertisedDpids = [];
 
     this.roster = Array.from({ length: 12 }, () =>
       this.generatePlayer("bench"),
@@ -376,6 +408,52 @@ export class FakeSimulationEngine implements SimulationEngine {
     };
   }
 
+  /**
+   * Deterministic fake trading block: one synthetic offer per opponent that
+   * has a roster, requesting the currently advertised assets and offering
+   * back that opponent's first player, `willing: true`. No advertisement
+   * (both arrays empty) yields no offers, mirroring the real engine's
+   * "nothing saved" case.
+   */
+  async getTradingBlock(): Promise<TradingBlockData> {
+    const tradableRoster = this.roster.map(playerToOfferAsset);
+    const tradablePicks = this.ownedPicks.map(pickToOfferAsset);
+    const offers = this.generateFakeOffers(
+      this.advertisedPids,
+      this.advertisedDpids,
+      true,
+    );
+    return {
+      advertisedPids: [...this.advertisedPids],
+      advertisedDpids: [...this.advertisedDpids],
+      offers,
+      tradableRoster,
+      tradablePicks,
+    };
+  }
+
+  /**
+   * Deterministic fake AI-initiated proposals: one player-for-player offer
+   * per opponent that has both a roster and a counterpart on the user's
+   * roster, independent of anything advertised on the trading block.
+   */
+  async getTradeProposals(): Promise<TradeProposalsData> {
+    const offers: TradeOffer[] = [];
+    if (this.roster.length === 0) return { offers };
+    for (const [tid, opponent] of this.opponents) {
+      const theirPlayer = opponent.players[0];
+      const ourPlayer = this.roster[0];
+      if (!theirPlayer || !ourPlayer) continue;
+      offers.push({
+        otherTeamId: tid,
+        offered: [playerToOfferAsset(ourPlayer)],
+        requested: [playerToOfferAsset(theirPlayer)],
+      });
+      if (offers.length >= 5) break;
+    }
+    return { offers };
+  }
+
   async executeTrade(proposal: TradeProposal): Promise<EngineEvent[]> {
     const evaluation = await this.evaluateTrade(proposal);
     if (!evaluation.legal || evaluation.acceptedByOtherTeam !== true) {
@@ -431,6 +509,36 @@ export class FakeSimulationEngine implements SimulationEngine {
       proposal.otherTeamId,
     ]);
     return [{ type: "trade", otherTeamId: proposal.otherTeamId }];
+  }
+
+  async advertiseOnTradingBlock(
+    input: AdvertiseOnTradingBlockInput,
+  ): Promise<EngineEvent[]> {
+    const rosterPids = new Set(this.roster.map((player) => player.pid));
+    for (const pid of input.pids) {
+      if (!rosterPids.has(pid))
+        throw new Error(`Player ${pid} is not on the user's roster`);
+    }
+    const ownedDpids = new Set(this.ownedPicks.map((pick) => pick.dpid));
+    for (const dpid of input.dpids) {
+      if (!ownedDpids.has(dpid))
+        throw new Error(`Draft pick ${dpid} is not owned by the user`);
+    }
+    this.advertisedPids = [...input.pids];
+    this.advertisedDpids = [...input.dpids];
+    const offers = this.generateFakeOffers(
+      this.advertisedPids,
+      this.advertisedDpids,
+      true,
+    );
+    return [
+      {
+        type: "trading_block_advertised",
+        pids: input.pids,
+        dpids: input.dpids,
+        offerCount: offers.length,
+      },
+    ];
   }
 
   async setLineup(input: SetLineupInput): Promise<EngineEvent[]> {
@@ -658,6 +766,8 @@ export class FakeSimulationEngine implements SimulationEngine {
       transactions: structuredClone(this.transactions),
       nextEntityId: this.nextEntityId,
       rngState: this.rng.state(),
+      advertisedPids: [...this.advertisedPids],
+      advertisedDpids: [...this.advertisedDpids],
     };
   }
 
@@ -683,6 +793,8 @@ export class FakeSimulationEngine implements SimulationEngine {
     this.userLost = snapshot.userLost;
     this.transactions = structuredClone(snapshot.transactions);
     this.nextEntityId = snapshot.nextEntityId;
+    this.advertisedPids = structuredClone(snapshot.advertisedPids ?? []);
+    this.advertisedDpids = structuredClone(snapshot.advertisedDpids ?? []);
     this.rng = seedrandom("restored", {
       state: snapshot.rngState as seedrandom.State.Arc4,
     });
@@ -782,6 +894,42 @@ export class FakeSimulationEngine implements SimulationEngine {
     });
   }
 
+  /** Deterministic (rng-free, so it never perturbs the seeded-random
+   * sequence other generators rely on) synthetic offer list: one offer per
+   * opponent that has a roster, requesting the given pids/dpids and
+   * offering back that opponent's first player. Empty input yields no
+   * offers. */
+  private generateFakeOffers(
+    pids: number[],
+    dpids: number[],
+    willing: boolean,
+  ): TradeOffer[] {
+    if (pids.length === 0 && dpids.length === 0) return [];
+    const offers: TradeOffer[] = [];
+    for (const [tid, opponent] of this.opponents) {
+      const theirPlayer = opponent.players[0];
+      if (!theirPlayer) continue;
+      const offered: TradeOfferAsset[] = [
+        ...pids
+          .map((pid) => this.roster.find((player) => player.pid === pid))
+          .filter((player): player is PlayerSummary => player !== undefined)
+          .map(playerToOfferAsset),
+        ...dpids
+          .map((dpid) => this.ownedPicks.find((pick) => pick.dpid === dpid))
+          .filter((pick): pick is DraftPickSummary => pick !== undefined)
+          .map(pickToOfferAsset),
+      ];
+      offers.push({
+        otherTeamId: tid,
+        offered,
+        requested: [playerToOfferAsset(theirPlayer)],
+        willing,
+      });
+      if (offers.length >= 5) break;
+    }
+    return offers;
+  }
+
   private allDraftPicks(): DraftPickSummary[] {
     return [
       ...structuredClone(this.ownedPicks),
@@ -822,6 +970,7 @@ export class FakeSimulationEngine implements SimulationEngine {
     if (this.phase !== "draft")
       categories.push(
         "execute_trade",
+        "advertise_on_trading_block",
         "set_lineup",
         "release_player",
         "negotiate_contract",

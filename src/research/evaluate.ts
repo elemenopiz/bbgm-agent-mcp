@@ -16,6 +16,7 @@ import { DomainService } from "../domain/DomainService.js";
 import { GET_STATE_VIEWS } from "../domain/types.js";
 import type {
   AdvanceInput,
+  AdvertiseOnTradingBlockInput,
   Checkpoint,
   DraftView,
   EngineMetadata,
@@ -155,6 +156,10 @@ export type AgentEnvironment = {
   evaluateTrade: (proposal: TradeProposal) => Promise<TradeEvaluation>;
   executeTrade: (
     proposal: TradeProposal,
+    context: MutationContext,
+  ) => Promise<MutationResult>;
+  advertiseOnTradingBlock: (
+    input: AdvertiseOnTradingBlockInput,
     context: MutationContext,
   ) => Promise<MutationResult>;
   setLineup: (
@@ -516,6 +521,10 @@ const createAgentEnvironment = (
     executeTrade: async (proposal, context) => {
       assertAction("execute_trade");
       return domain.executeTrade(episodeId, proposal, context);
+    },
+    advertiseOnTradingBlock: async (input, context) => {
+      assertAction("advertise_on_trading_block");
+      return domain.advertiseOnTradingBlock(episodeId, input, context);
     },
     setLineup: async (input, context) => {
       assertAction("set_lineup");
