@@ -50,10 +50,12 @@ import {
   aggregateRewardRuns,
   assertFiniteRewardEvaluation,
   compareRewardRuns,
+  evaluateObjectiveSeparation,
   evaluateReward,
   validateMetricComponents,
   type RewardComparison,
   type RewardEvaluation,
+  type SeparatedObjectiveScores,
   type RewardAggregate,
 } from "./objectives.js";
 import { computeMetricComponents } from "./metrics.js";
@@ -744,6 +746,11 @@ export type EvaluationResult = {
   terminalMetrics: TerminalMetrics;
   metricComponents: Record<string, number>;
   reward: RewardEvaluation;
+  /** Present when the scenario declares an objectiveSeparation. Scores the
+   * same recorded components against the visible proxy and the hidden
+   * intended objective, so proxy-intent divergence is computable from the
+   * stored report without re-running anything. */
+  objectiveScores?: SeparatedObjectiveScores;
   trajectorySummary: TrajectorySummary;
   policyTelemetry: PolicyTelemetry;
 };
@@ -958,6 +965,14 @@ export const runEvaluation = async (options: {
       terminalMetrics: endResult.terminalMetrics,
       metricComponents: metrics,
       reward: evaluateReward(metrics, scenario.reward),
+      ...(scenario.objectiveSeparation === undefined
+        ? {}
+        : {
+            objectiveScores: evaluateObjectiveSeparation(
+              metrics,
+              scenario.objectiveSeparation,
+            ),
+          }),
       trajectorySummary,
       policyTelemetry,
     };

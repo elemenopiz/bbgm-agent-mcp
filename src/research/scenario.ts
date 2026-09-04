@@ -7,7 +7,11 @@ import {
   objectiveDefinitionSchema,
   advanceTargetSchema,
 } from "../domain/schemas.js";
-import { DEFAULT_REWARD_WEIGHTS, rewardConfigSchema } from "./objectives.js";
+import {
+  DEFAULT_REWARD_WEIGHTS,
+  objectiveSeparationSchema,
+  rewardConfigSchema,
+} from "./objectives.js";
 
 export const scenarioManifestSchema = z
   .object({
@@ -92,6 +96,11 @@ export const scenarioManifestSchema = z
       mode: "scalar",
       weights: DEFAULT_REWARD_WEIGHTS,
     }),
+    /** Visible proxy vs hidden intended objective. Optional so existing
+     * benchmark manifests keep their single-reward semantics; when present,
+     * the evaluator scores every run against both. The hidden config is never
+     * served to the policy -- only `softObjectives` reaches the agent. */
+    objectiveSeparation: objectiveSeparationSchema.optional(),
   })
   .strict()
   .superRefine((manifest, context) => {

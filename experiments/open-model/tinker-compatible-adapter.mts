@@ -54,6 +54,11 @@ class ModelFailure extends Error {
   constructor(
     public readonly failureKind: ModelFailureKind,
     message: string,
+    /** Whether another attempt could plausibly succeed, and how long the
+     * provider asked us to wait. Carried on the error rather than in module
+     * state so concurrent seeds cannot clobber each other. */
+    public readonly retryable = false,
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "ModelFailure";
@@ -294,9 +299,74 @@ const observationPrompt = (
 ): string =>
   `${promptText}\n\nObservation JSON:\n${JSON.stringify(compactObservation(observation))}\n\nLast tool result/error JSON:\n${JSON.stringify(compactValue(lastToolOutcome))}\n\nReturn one action JSON object:`;
 
+/**
+ * Retry budget for transient provider failures. A shared free-tier endpoint
+ * returns 429 routinely, and treating that as fatal ends the episode at
+ * whatever step the limiter happened to fire -- which shows up in the report
+ * as a stalled policy rather than as a busy provider. Retrying bounded and
+ * backing off keeps provider capacity out of the behavioural measurement.
+ * Genuine model failures (unparseable output, a refused request) are not
+ * retried; only transport errors, 429, and 5xx are.
+ */
+const RETRY_ATTEMPTS = Number(process.env["BBGM_MODEL_RETRY_ATTEMPTS"] ?? 6);
+const RETRY_BASE_MS = Number(process.env["BBGM_MODEL_RETRY_BASE_MS"] ?? 2000);
+
+/**
+ * Optional comma-separated fallback models, tried in order when the primary
+ * model is unavailable (a shared free tier rate-limits per model, so a second
+ * model is usually servable when the first is not).
+ *
+ * This trades policy identity for completion, so it is off unless explicitly
+ * set. A run that used it is NOT a single-policy result: every response
+ * records its serving model, and any comparison across policies must pin one
+ * model instead. Use it to exercise the environment, never to produce a
+ * behavioural measurement.
+ */
+const fallbackModels = (): string[] =>
+  (process.env["BBGM_MODEL_FALLBACK_IDS"] ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+const isRetryableStatus = (status: number): boolean =>
+  status === 429 || status === 408 || status >= 500;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+
 const callModel = async (
   context: PolicyStepContext,
   lastToolOutcome: StructuredToolOutcome | null,
+): Promise<{ raw: string; responseModel?: string }> => {
+  const candidates = [modelId(), ...fallbackModels()];
+  let lastFailure: ModelFailure | undefined;
+  for (let attempt = 0; attempt < Math.max(1, RETRY_ATTEMPTS); attempt += 1) {
+    if (attempt > 0) {
+      // Exponential backoff, honouring Retry-After when the provider sends it.
+      await sleep(
+        lastFailure?.retryAfterMs ?? RETRY_BASE_MS * 2 ** (attempt - 1),
+      );
+    }
+    // Within one attempt, try each candidate model before backing off again.
+    for (const candidate of candidates) {
+      try {
+        return await callModelOnce(context, lastToolOutcome, candidate);
+      } catch (error) {
+        if (!(error instanceof ModelFailure) || !error.retryable) throw error;
+        lastFailure = error;
+      }
+    }
+  }
+  throw (
+    lastFailure ??
+    new ModelFailure("provider", "model endpoint failed with no recorded error")
+  );
+};
+
+const callModelOnce = async (
+  context: PolicyStepContext,
+  lastToolOutcome: StructuredToolOutcome | null,
+  candidateModel: string,
 ): Promise<{ raw: string; responseModel?: string }> => {
   const apiKey =
     process.env["TINKER_API_KEY"] ?? process.env["BBGM_MODEL_API_KEY"];
@@ -315,7 +385,7 @@ const callModel = async (
         Number(process.env["BBGM_MODEL_TIMEOUT_MS"] ?? 120_000),
       ),
       body: JSON.stringify({
-        model: modelId(),
+        model: candidateModel,
         messages: [
           { role: "system", content: promptText },
           {
@@ -325,7 +395,7 @@ const callModel = async (
         ],
         temperature: 0,
         top_p: 1,
-        max_tokens: 96,
+        max_tokens: Number(process.env["BBGM_MODEL_MAX_TOKENS"] ?? 96),
         ...(process.env["BBGM_MODEL_SEED"] === undefined
           ? {}
           : { seed: Number(process.env["BBGM_MODEL_SEED"]) }),
@@ -335,6 +405,7 @@ const callModel = async (
     throw new ModelFailure(
       "provider",
       `model endpoint request failed: ${errorMessage(error)}`,
+      true,
     );
   }
 
@@ -350,9 +421,14 @@ const callModel = async (
     );
   }
   if (!response.ok) {
+    const retryAfter = Number(response.headers.get("retry-after"));
     throw new ModelFailure(
       "provider",
       `model endpoint returned HTTP ${response.status}: ${JSON.stringify(body.error ?? body)}`,
+      isRetryableStatus(response.status),
+      Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(60_000, retryAfter * 1000)
+        : undefined,
     );
   }
   let raw: string;
