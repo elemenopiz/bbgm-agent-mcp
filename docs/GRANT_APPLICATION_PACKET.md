@@ -333,6 +333,12 @@ Do not send until every line is true.
 - [ ] The credit request names a specific amount **and** the reduced tier.
 - [ ] The proposal separates measured repository evidence from funded future
       work, with no claim that a Tinker-trained result already exists.
+- [ ] **The reference panel and replay manifest have been regenerated under the
+      current state-hash definition.** The hash changed when derived roster
+      enrichment was removed from it (see PROBE_FINDINGS.md F9), so every
+      artifact produced before that commit fails `research:replay` and must not
+      be cited. Confirm a fresh `research:replay` passes on the panel actually
+      referenced by the submission.
 - [ ] The null-result commitment is present.
 - [ ] Program-terms checklist in §9 is complete.
 - [ ] Attachments open cleanly as PDFs from a different machine.

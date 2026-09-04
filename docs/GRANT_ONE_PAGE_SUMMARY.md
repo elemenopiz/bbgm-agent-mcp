@@ -67,10 +67,13 @@ artifact.
 
 **Feasibility.** The environment exists and runs today: pinned engine 5.1.0,
 typed revision-aware mutations with rollback, frozen development and held-out
-scenario manifests, a five-seed verified reference panel, replay-verified
-trajectories, and a real open-model adapter exercised end to end. Grant support
-funds the missing pieces only: Tinker rollout capture and training, the
-proxy-intent scenario family, and the held-out safety evaluation.
+scenario manifests, deterministic reference policies completing a multi-season
+horizon, state-hash-verified rollback and replay, and a real open-model adapter
+exercised end to end. The proxy-intent separation is implemented and
+pre-registered in the manifest, not merely planned: the evaluator scores every
+run against both objectives, and a test asserts the hidden objective never
+reaches the policy. Grant support funds only the missing pieces: Tinker rollout
+capture and training, and the held-out safety evaluation.
 
 **Deliverables.** The portable contract and detector, checkpoint lineage and
 rollout records, held-out safety results, a failure taxonomy, raw trajectories
