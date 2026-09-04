@@ -30,6 +30,10 @@ const MODELS = (
 const SEED = process.env["PROBE_SEED"] ?? "grant-seed-001";
 const MAX_STEPS = Number(process.env["PROBE_STEPS"] ?? 25);
 const START_SEASON = 2026;
+// When 0, drop the hand-written free-agent paging and the min-salary hint.
+// Those existed to compensate for information the environment did not expose;
+// with the enriched surface they are the thing under test, not a fixture.
+const SCAFFOLD = process.env["PROBE_SCAFFOLD"] !== "0";
 const OBJECTIVE =
   process.env["PROBE_OBJECTIVE"] ??
   "Build the strongest possible team over the next several seasons.";
@@ -52,7 +56,7 @@ const ctx = (revision: number): MutationContext => ({
 });
 
 const TOOLS = `Available tools (emit exactly ONE JSON object, no prose):
-{"tool":"get_state","view":"overview"|"roster"|"draft"|"standings"|"finances"}
+{"tool":"get_state","view":"overview"|"roster"|"draft"|"standings"|"finances"|"free_agents","limit":<1-50>,"cursor":<int|omit>}
 {"tool":"advance","target":"next_decision"}
 {"tool":"make_draft_pick","pid":<int>}
 {"tool":"negotiate_contract","pid":<int>,"amount":<number>,"years":<int>}
@@ -153,6 +157,7 @@ const main = async (): Promise<void> => {
   };
 
   let lastError = "";
+  let lastRead = "";
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const ov = (await domain.getState({
       episodeId,
@@ -179,7 +184,7 @@ const main = async (): Promise<void> => {
         })),
       )}`;
     }
-    if (ov.rosterCount < 14) {
+    if (SCAFFOLD && ov.rosterCount < 14) {
       // Page the whole pool, then surface what is actually signable at the
       // current cap position. Showing one truncated page hid 134
       // minimum-salary players and deadlocked the agent.
@@ -228,9 +233,12 @@ ${TOOLS}
 
 Season ${ov.season}, phase ${ov.phase}. Record ${ov.userTeam.won}-${ov.userTeam.lost}.
 Roster size ${ov.rosterCount}. Cap space ${ov.userTeam.capSpace.toFixed(1)}.
-Min contract ${ov.userTeam.minContract.toFixed(2)}, max ${ov.userTeam.maxContract.toFixed(1)}. \
-Over the cap you may STILL sign free agents at the minimum salary.
-Next required decision: ${ov.nextDecision}${lastError ? `\nYOUR LAST ACTION FAILED: ${lastError}` : ""}
+Min contract ${ov.userTeam.minContract.toFixed(2)}, max ${ov.userTeam.maxContract.toFixed(1)}.${
+      SCAFFOLD
+        ? " Over the cap you may STILL sign free agents at the minimum salary."
+        : ""
+    }
+Next required decision: ${ov.nextDecision}${lastError ? `\nYOUR LAST ACTION FAILED: ${lastError}` : ""}${lastRead}
 Roster: ${JSON.stringify(
       roster.players.map((p) => ({
         pid: p.pid,
@@ -252,10 +260,24 @@ Emit one tool call as JSON.`;
     const tool = asText(action["tool"], "");
     try {
       if (tool === "get_state") {
-        await domain.getState({
+        // Honour the model's own paging. Without it a single truncated page
+        // hid the minimum-salary free agents entirely, which reads as an
+        // incapable policy when it is really an unreachable observation.
+        const limit = Number(action["limit"]);
+        const cursor = Number(action["cursor"]);
+        const view = asText(action["view"], "overview");
+        const page = await domain.getState({
           episodeId,
-          view: asText(action["view"], "overview"),
+          view,
+          ...(Number.isFinite(limit) && limit > 0
+            ? { limit: Math.min(50, Math.trunc(limit)) }
+            : {}),
+          ...(Number.isFinite(cursor) ? { cursor: Math.trunc(cursor) } : {}),
         });
+        lastRead =
+          view === "free_agents"
+            ? `\nfree_agents page you requested: ${JSON.stringify(page).slice(0, 3000)}`
+            : "";
         tel.validActions += 1;
       } else if (tool === "advance") {
         const r = await domain.advance(
@@ -336,12 +358,17 @@ Emit one tool call as JSON.`;
     episodeId,
     view: "overview",
   })) as OverviewView;
-  const outPath = join(process.cwd(), ".data", "agent6-probe.json");
+  const outPath = join(
+    process.cwd(),
+    ".data",
+    `agent6-probe-${SCAFFOLD ? "scaffolded" : "bare"}.json`,
+  );
   await writeFile(
     outPath,
     JSON.stringify(
       {
         seed: SEED,
+        scaffold: SCAFFOLD,
         models: MODELS,
         objective: OBJECTIVE,
         telemetry: tel,
@@ -356,7 +383,7 @@ Emit one tool call as JSON.`;
   const denom = tel.validActions + tel.invalidActions + tel.parseFailures;
   process.stdout.write(`
 === AGENT 6: MODEL CAPABILITY ===
-seed=${SEED} steps=${MAX_STEPS}
+seed=${SEED} steps=${MAX_STEPS} scaffold=${SCAFFOLD}
 model calls      ${tel.modelCalls}
 valid actions    ${tel.validActions}
 invalid actions  ${tel.invalidActions}

@@ -1163,15 +1163,15 @@ export function createBasketballGmAdapter(
       roster: applyEnrichment(
         normalizeRosterOrder(
           rawRoster.map((p) => mapPlayerToSummary(p, currentSeason)),
-        ).sort((a, b) => b.overall - a.overall),
+        ).sort((a, b) => b.overall - a.overall || a.pid - b.pid),
         rosterEnrichmentCache,
       ),
       freeAgents: freeAgentRows
         .map((p) => mapPlayerToSummary(p, currentSeason))
-        .sort((a, b) => b.overall - a.overall),
+        .sort((a, b) => b.overall - a.overall || a.pid - b.pid),
       draftProspects: undraftedRows
         .map((p) => mapProspectToSummary(p, currentSeason))
-        .sort((a, b) => b.scoutedOverall - a.scoutedOverall),
+        .sort((a, b) => b.scoutedOverall - a.scoutedOverall || a.pid - b.pid),
       draftPicks: (await idb.cache.draftPicks.getAll()).map((pick) =>
         mapDraftPickToSummary(pick, currentSeason),
       ),

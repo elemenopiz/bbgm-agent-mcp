@@ -37,7 +37,7 @@ import {
   signFreeAgentInputSchema,
   tradeProposalSchema,
 } from "./schemas.js";
-import { stateHash } from "./stateHash.js";
+import { episodeStateHash, stateHash } from "./stateHash.js";
 import {
   DEFAULT_ALLOWED_ACTIONS,
   DEFAULT_ALLOWED_ADVANCE_TARGETS,
@@ -1188,7 +1188,7 @@ export class DomainService {
   }
 
   private computeStateHash(revision: number, state: EngineRawState): string {
-    return stateHash({ revision, state });
+    return episodeStateHash(revision, state);
   }
 
   private errorCode(error: unknown): string {

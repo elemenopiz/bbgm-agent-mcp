@@ -4,7 +4,7 @@ import type {
   SimulationEngine,
   SimulationEngineFactory,
 } from "../domain/SimulationEngine.js";
-import { stateHash } from "../domain/stateHash.js";
+import { episodeStateHash } from "../domain/stateHash.js";
 import { DomainError } from "../domain/errors.js";
 import {
   DEFAULT_ALLOWED_ACTIONS,
@@ -297,10 +297,7 @@ export class EpisodeManager {
       await engine.importSnapshot(snapshot);
       if (metadata.stateHash !== undefined) {
         const state = await engine.getRawState();
-        const importedHash = stateHash({
-          revision: metadata.revision,
-          state,
-        });
+        const importedHash = episodeStateHash(metadata.revision, state);
         if (importedHash !== metadata.stateHash) {
           await this.quarantineMetadata(metadata);
           throw new DomainError(

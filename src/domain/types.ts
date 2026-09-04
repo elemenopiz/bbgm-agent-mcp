@@ -194,6 +194,35 @@ export type PlayerSummary = {
   per?: number;
 };
 
+/**
+ * The PlayerSummary fields above that are derived presentation enrichment
+ * sourced from zengm's roster view rather than engine state of record.
+ *
+ * These are excluded from the episode state hash. Mood-derived floats -- most
+ * notably `probWilling` -- are not bit-reproducible across a snapshot
+ * export/import round trip (observed drift at the eighth decimal place), so
+ * including them made rollback verification and replay non-deterministic: a
+ * correctly restored snapshot could hash differently from the pre-action
+ * state and quarantine a healthy episode. Every field here is a pure function
+ * of state that IS hashed, so dropping them loses no change detection.
+ */
+export const PLAYER_SUMMARY_DERIVED_FIELDS = [
+  "overallChange",
+  "potentialChange",
+  "skills",
+  "untradable",
+  "willingToNegotiate",
+  "probWilling",
+  "askingAmount",
+  "yearsWithTeam",
+  "gamesPlayed",
+  "minutesPerGame",
+  "pointsPerGame",
+  "reboundsPerGame",
+  "assistsPerGame",
+  "per",
+] as const satisfies readonly (keyof PlayerSummary)[];
+
 // ---------------------------------------------------------------------------
 // Player detail (bbgm_get_player) -- the "click into a player" view. Sourced
 // from zengm's own player worker view (src/worker/views/player.ts), which

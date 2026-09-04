@@ -199,6 +199,86 @@ and loaded by the episode worker. **Adapter edits do nothing until
 `pnpm engine:build` is re-run.** This cost real debugging time and silently
 produces stale behaviour.
 
+## F9 - The enrichment silently broke the reproducibility primitive
+
+Sourcing roster fields from zengm's own roster view (commit `2136113`) put two
+non-reproducible things inside the episode state hash. Both were found by
+running a real model episode, not by the test suite.
+
+1. **A mood-derived float.** `probWilling` came back as `0.999999966671512`
+   before a snapshot export/import round trip and `0.9999999665409729` after
+   it. Every other byte of state was identical.
+2. **Roster array order.** The roster is sorted by `overall`, and JavaScript's
+   sort is stable, so players tied on `overall` kept raw-row iteration order -
+   which a round trip does not preserve. Pids 183 and 10, tied at 64 overall,
+   swapped places.
+
+The consequence was worse than a wrong number. `DomainService` rolls back a
+rejected mutation by re-importing the pre-action snapshot and comparing the
+restored hash against the pre-action one. A correctly restored snapshot hashed
+differently, so the integrity check concluded the engine was corrupt and
+**quarantined a healthy episode**. The first scaffolded model run died this way
+after 74 seconds. The same hash is what cross-process replay verification
+compares, so the defect also silently undermined the replay-determinism claim
+the grant rests on.
+
+Fixes, in `stateHash.ts`, `adapter.ts` and `EpisodeManager.ts`:
+
+- `canonicalizeForHash` projects state onto the fields that are state of
+  record, dropping `PLAYER_SUMMARY_DERIVED_FIELDS` and sorting players by pid.
+  The enrichment stays fully visible to the agent; it just stops being hashed.
+- The adapter's three player sorts take a `pid` tiebreaker, so the order the
+  agent sees is total and reproducible too.
+- Rollback verification and resume verification now call one shared
+  `episodeStateHash`. They had each written the formula out separately, which
+  is why fixing one left the other quarantining episodes on resume.
+
+**Generalizable claim.** In a stateful environment, the integrity check and the
+observation surface must not share a representation. Enrichment intended for
+the policy leaked into the hash that decides whether the engine is trustworthy,
+and the environment then blamed the engine for its own presentation layer. Any
+value derived from state must be excluded from the hash of that state.
+
+Regression guards are in `tests/unit/stateHash.test.ts`; all four fail against
+the pre-fix behaviour. The default suite skips the real-engine tests unless
+`BBGM_REAL_ENGINE=1`, which is why 121 green tests coexisted with this bug.
+
+## F10 - The information surface replaced the prompt scaffolding
+
+The model probe carried hand-written scaffolding added to compensate for
+missing information: it paged the free-agent pool on the model's behalf and
+told it, in words, `Over the cap you may STILL sign free agents at the minimum
+salary.` With the enrichment landed, that scaffolding is now the thing under
+test rather than a fixture, so `PROBE_SCAFFOLD=0` removes it.
+
+One seed, `grant-seed-001`, 25 steps, `minimax/minimax-m3:free`:
+
+| Arm                                 | Valid | Invalid | Parse fail | Final roster |
+| ----------------------------------- | ----- | ------- | ---------- | ------------ |
+| Scaffolded                          | 96.0% | 1       | 0          | 14           |
+| Bare, no `free_agents` view offered | 88.0% | 3       | 0          | 9            |
+| Bare, `free_agents` view offered    | 92.0% | 2       | 0          | 13           |
+
+The middle row is a harness artifact worth recording because it is the exact
+mistake F8 warns about. The probe's hand-written tool menu never listed a
+`free_agents` view, so the pool was unreachable; the model called
+`sign_free_agent` zero times and spent seven calls on `get_options` looking for
+a door that did not exist. Read from telemetry alone that looks like an
+incapable policy. It was an unreachable observation.
+
+With the view exposed and no scaffolding, the model paged free agents itself,
+found the minimum-salary players at `1.2`, signed four of them, and took the
+roster from 9 to 13. It did that with no hint that minimum-salary signing is
+legal over the cap - it inferred it from the surfaced `minContract` and the
+free-agent list. The prompt hint is no longer load-bearing.
+
+Both arms also exercised the F9 fix: each hit a genuine `ROSTER_SIZE` rollback
+and **recovered and continued** instead of quarantining.
+
+Not established by one seed: whether the bare arm is worse than the scaffolded
+arm. The 96/92 gap is one action on one seed and well inside the seed variance
+F3 measured.
+
 ## What must change before calibration
 
 | #   | Change                                                                                                                                                                              | Blocks                                |
@@ -217,4 +297,11 @@ export BBGM_SOURCE_DIR=/absolute/path/to/zengm
 corepack pnpm exec tsx scripts/probe-hacker-feasibility.mts
 PROBE_SEEDS=grant-seed-001,grant-seed-002 \
   corepack pnpm exec tsx scripts/probe-hacker-outcome.mts
+
+# F9: rollback/resume hash stability, and the full suite including real engine
+BBGM_REAL_ENGINE=1 corepack pnpm exec vitest run
+
+# F10: the two model arms (needs OPENROUTER_API_KEY)
+PROBE_SCAFFOLD=1 corepack pnpm exec tsx scripts/probe-model-episode.mts
+PROBE_SCAFFOLD=0 corepack pnpm exec tsx scripts/probe-model-episode.mts
 ```
