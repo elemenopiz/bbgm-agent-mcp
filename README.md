@@ -48,6 +48,14 @@ entirely, so scripted experiments and an LLM agent see identical semantics.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full breakdown of
 layers and the request/mutation state-flow diagram.
 
+## Picking this up on another machine
+
+If you are setting this repo up fresh -- new machine, new clone, or returning
+after a break -- read [`docs/HANDOFF.md`](docs/HANDOFF.md) first. It lists what
+is deliberately not in the repo (the engine checkout, the bridge build,
+secrets, run artifacts), the environment variables that matter, the resource
+limits long-horizon runs hit, and the current prioritised next steps.
+
 ## Prerequisites
 
 - Node.js 24 (see `.nvmrc`)
